@@ -66,7 +66,7 @@ Unsupported combinations fail an assertion.
 | --- | --- | --- |
 | `clk_i` | input | system clock |
 | `rst_n_i` | input | active-low synchronous reset |
-| `bus_assume_free_i` | input | permit reset-time HIGH+tBUF qualification |
+| `bus_assume_free_i` | input | Permit HIGH+tBUF bus-free qualification without an observed STOP. |
 | `cmd_valid_i` | input | command fields are valid |
 | `cmd_ready_o` | output | command can be accepted |
 | `cmd_start_i` | input | prepend START or repeated START |
@@ -75,6 +75,9 @@ Unsupported combinations fail an assertion.
 | `cmd_read_i` | input | zero writes; one reads |
 | `cmd_data_i[7:0]` | input | byte transmitted by a write |
 | `cmd_nack_i` | input | bit transmitted after a read |
+
+`bus_assume_free_i` must be static or synchronous to `clk_i`. It is sampled
+directly and is not synchronized inside the core.
 
 A command is accepted on a rising `clk_i` edge when `cmd_valid_i` and
 `cmd_ready_o` are both high. All command fields must remain stable for that
@@ -163,6 +166,9 @@ The core qualifies the bus free after tBUF only when either:
 - it observes a real STOP on synchronized SCL and SDA; or
 - `bus_assume_free_i = '1'` and synchronized SCL and SDA remain continuously
   HIGH for the complete mode-specific tBUF interval.
+
+`bus_assume_free_i` must be static or synchronous to `clk_i`. It is sampled
+directly and is not synchronized inside the core.
 
 Tie `bus_assume_free_i` low when reset may occur during another controller's
 transfer. In that mode the core waits indefinitely for an observed STOP. Tie

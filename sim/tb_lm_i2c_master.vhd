@@ -239,6 +239,10 @@ architecture a_tb of tb_lm_i2c_master is
     constant late_ack     : in  boolean := false
   ) is
   begin
+    -- Late ACK and data exercise the legal worst-case data-valid time. They
+    -- do not distinguish sampling positions within the SCL HIGH phase because
+    -- compliant SDA remains stable while SCL is HIGH and the DUT observes it
+    -- through its input synchronizer.
     for v_bit in 7 downto 0 loop
       if v_bit = stretch_bit then
         p_stretch_next_high(dut_scl_low, peer_scl_low);
