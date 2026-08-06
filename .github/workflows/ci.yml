@@ -106,6 +106,7 @@ jobs:
           $cleanMessage = Join-Path $env:RUNNER_TEMP "lm_i2c-clean.txt"
           $blockedMessage = Join-Path $env:RUNNER_TEMP "lm_i2c-blocked.txt"
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $powerShellPath = (Get-Process -Id $PID).Path
 
           try {
             [IO.File]::WriteAllText(
@@ -113,11 +114,22 @@ jobs:
               "ci: validate repository hygiene`n",
               $utf8NoBom
             )
-            & pwsh -NoLogo -NoProfile -File `
-              ./tools/check_repo_hygiene.ps1 `
-              -Mode CommitMessage `
-              -CommitMessageFile $cleanMessage
-            $cleanExitCode = $LASTEXITCODE
+            $cleanProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                "./tools/check_repo_hygiene.ps1",
+                "-Mode",
+                "CommitMessage",
+                "-CommitMessageFile",
+                $cleanMessage
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            $cleanExitCode = $cleanProcess.ExitCode
             if ($cleanExitCode -ne 0) {
               throw "Clean commit message was rejected."
             }
@@ -127,11 +139,22 @@ jobs:
               ("Generated" + "-by: controlled check`n"),
               $utf8NoBom
             )
-            & pwsh -NoLogo -NoProfile -File `
-              ./tools/check_repo_hygiene.ps1 `
-              -Mode CommitMessage `
-              -CommitMessageFile $blockedMessage
-            $blockedExitCode = $LASTEXITCODE
+            $blockedProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                "./tools/check_repo_hygiene.ps1",
+                "-Mode",
+                "CommitMessage",
+                "-CommitMessageFile",
+                $blockedMessage
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            $blockedExitCode = $blockedProcess.ExitCode
             if ($blockedExitCode -ne 1) {
               throw "Blocked commit message did not return exit code 1."
             }
