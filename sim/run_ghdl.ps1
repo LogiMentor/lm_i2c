@@ -1,21 +1,47 @@
 # Copyright 2026 LogiMentor Srl
 # SPDX-License-Identifier: Apache-2.0
 
+[CmdletBinding()]
 param(
-  [string]$Ghdl = "ghdl"
+  [string]$Ghdl = "ghdl",
+  [string]$StopTime = "20ms"
 )
 
 $ErrorActionPreference = "Stop"
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+  $PSNativeCommandUseErrorActionPreference = $false
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$workRoot = Join-Path $PSScriptRoot "work-ghdl"
+$workRoot = Join-Path (
+  [IO.Path]::GetTempPath()
+) ("lm_i2c-ghdl-" + [guid]::NewGuid().ToString("N"))
 $rtlWork = Join-Path $workRoot "rtl-93"
 $simWork = Join-Path $workRoot "sim-08"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+$locationPushed = $false
 
-if (Test-Path -LiteralPath $workRoot) {
-  Remove-Item -LiteralPath $workRoot -Recurse -Force
+function Invoke-GhdlCapture {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Arguments
+  )
+
+  $savedPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& $Ghdl @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+  }
+  finally {
+    $ErrorActionPreference = $savedPreference
+  }
+
+  return [pscustomobject]@{
+    ExitCode = $exitCode
+    Output = $output
+  }
 }
-New-Item -ItemType Directory -Path $rtlWork -Force | Out-Null
-New-Item -ItemType Directory -Path $simWork -Force | Out-Null
 
 function Invoke-Ghdl {
   param(
@@ -23,78 +49,216 @@ function Invoke-Ghdl {
     [string[]]$Arguments
   )
 
-  & $Ghdl @Arguments
-  if ($LASTEXITCODE -ne 0) {
-    throw "GHDL failed with exit code $LASTEXITCODE."
+  $result = Invoke-GhdlCapture -Arguments $Arguments
+  $result.Output | ForEach-Object { Write-Host $_ }
+  if ($result.ExitCode -ne 0) {
+    exit $result.ExitCode
   }
 }
 
-$rtl = Join-Path $repoRoot "src/lm_i2c_master.vhd"
-$tb = Join-Path $PSScriptRoot "tb_lm_i2c_master.vhd"
-$invalidTb = Join-Path $PSScriptRoot "tb_lm_i2c_master_invalid.vhd"
+function Invoke-GhdlWithMarker {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Marker,
 
-Push-Location $workRoot
-try {
-  Invoke-Ghdl @("-a", "--std=93", "--workdir=$rtlWork", $rtl)
-  & $Ghdl "--synth" "--std=93" "--workdir=$rtlWork" "lm_i2c_master" | Out-Null
-  if ($LASTEXITCODE -ne 0) {
-    throw "GHDL synthesis check failed with exit code $LASTEXITCODE."
+    [Parameter(Mandatory = $true)]
+    [string]$OutputFile,
+
+    [Parameter(Mandatory = $true)]
+    [string[]]$Arguments
+  )
+
+  $result = Invoke-GhdlCapture -Arguments $Arguments
+  $text = ($result.Output | Out-String)
+  [IO.File]::WriteAllText($OutputFile, $text, $utf8NoBom)
+  $result.Output | ForEach-Object { Write-Host $_ }
+
+  if ($result.ExitCode -ne 0) {
+    exit $result.ExitCode
   }
 
-  Invoke-Ghdl @("-a", "--std=08", "--workdir=$simWork", $rtl, $tb, $invalidTb)
+  $markerCount = [regex]::Matches(
+    $text,
+    [regex]::Escape($Marker)
+  ).Count
+  if ($markerCount -ne 1) {
+    [Console]::Error.WriteLine(
+      "Expected exactly one success marker: $Marker"
+    )
+    exit 1
+  }
+}
+
+function Invoke-GhdlExpectedFailure {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Expected,
+
+    [Parameter(Mandatory = $true)]
+    [string]$OutputFile,
+
+    [Parameter(Mandatory = $true)]
+    [string[]]$Arguments
+  )
+
+  $result = Invoke-GhdlCapture -Arguments $Arguments
+  $text = ($result.Output | Out-String)
+  [IO.File]::WriteAllText($OutputFile, $text, $utf8NoBom)
+  $result.Output | ForEach-Object { Write-Host $_ }
+
+  if ($result.ExitCode -eq 0) {
+    [Console]::Error.WriteLine(
+      "Invalid generic configuration was unexpectedly accepted."
+    )
+    exit 1
+  }
+  if (-not $text.Contains($Expected)) {
+    [Console]::Error.WriteLine(
+      "Invalid generic check failed for an unexpected reason."
+    )
+    exit 1
+  }
+}
+
+New-Item -ItemType Directory -Path $rtlWork -Force | Out-Null
+New-Item -ItemType Directory -Path $simWork -Force | Out-Null
+
+try {
+  Push-Location $workRoot
+  $locationPushed = $true
+
+  $rtl = Join-Path $repoRoot "src/lm_i2c_master.vhd"
+  $tb = Join-Path $PSScriptRoot "tb_lm_i2c_master.vhd"
+  $resetTb = Join-Path $PSScriptRoot "tb_lm_i2c_master_reset.vhd"
+  $invalidTb = Join-Path $PSScriptRoot "tb_lm_i2c_master_invalid.vhd"
+  $mainMarker = "lm_i2c_master self-check passed"
+
+  Invoke-Ghdl @("-a", "--std=93", "--workdir=$rtlWork", $rtl)
+  $synthesisResult = Invoke-GhdlCapture -Arguments @(
+    "--synth",
+    "--std=93",
+    "--workdir=$rtlWork",
+    "-gg_clk_freq_hz=50000000",
+    "-gg_i2c_freq_hz=400000",
+    "lm_i2c_master"
+  )
+  [IO.File]::WriteAllText(
+    (Join-Path $workRoot "synthesis.txt"),
+    ($synthesisResult.Output | Out-String),
+    $utf8NoBom
+  )
+  if ($synthesisResult.ExitCode -ne 0) {
+    $synthesisResult.Output | ForEach-Object { Write-Host $_ }
+    exit $synthesisResult.ExitCode
+  }
+
+  Invoke-Ghdl @(
+    "-a",
+    "--std=08",
+    "--workdir=$simWork",
+    $rtl,
+    $tb,
+    $resetTb,
+    $invalidTb
+  )
   Invoke-Ghdl @("-e", "--std=08", "--workdir=$simWork", "tb_lm_i2c_master")
-  Invoke-Ghdl @("-e", "--std=08", "--workdir=$simWork", "tb_lm_i2c_master_invalid")
+  Invoke-Ghdl @(
+    "-e",
+    "--std=08",
+    "--workdir=$simWork",
+    "tb_lm_i2c_master_reset"
+  )
+  Invoke-Ghdl @(
+    "-e",
+    "--std=08",
+    "--workdir=$simWork",
+    "tb_lm_i2c_master_invalid"
+  )
 
   $testCases = @(
     @{ Clock = 10000000; Bus = 100000 },
-    @{ Clock = 10000000; Bus = 400000 },
     @{ Clock = 12000000; Bus = 100000 },
-    @{ Clock = 8000000; Bus = 1000000 }
+    @{ Clock = 10000000; Bus = 400000 },
+    @{ Clock = 50000000; Bus = 400000 }
   )
 
-  foreach ($testCase in $testCases) {
-    Write-Host ("Running clk={0} Hz, scl={1} Hz" -f $testCase.Clock, $testCase.Bus)
-    Invoke-Ghdl @(
-      "-r", "--std=08", "--workdir=$simWork", "tb_lm_i2c_master",
-      "-gg_clk_freq_hz=$($testCase.Clock)",
-      "-gg_i2c_freq_hz=$($testCase.Bus)",
-      "--assert-level=error",
-      "--stop-time=20ms"
+  for ($index = 0; $index -lt $testCases.Count; $index++) {
+    $testCase = $testCases[$index]
+    Write-Host (
+      "Running clk={0} Hz, scl={1} Hz" -f
+        $testCase.Clock,
+        $testCase.Bus
     )
+    Invoke-GhdlWithMarker `
+      -Marker $mainMarker `
+      -OutputFile (Join-Path $workRoot "main-$index.txt") `
+      -Arguments @(
+        "-r",
+        "--std=08",
+        "--workdir=$simWork",
+        "tb_lm_i2c_master",
+        "-gg_clk_freq_hz=$($testCase.Clock)",
+        "-gg_i2c_freq_hz=$($testCase.Bus)",
+        "--assert-level=error",
+        "--stop-time=$StopTime"
+      )
   }
 
-  $invalidCases = @(
-    @{
-      Clock = 4000000
-      Bus = 1000000
-      Message = "at least eight times"
-    },
-    @{
-      Clock = 16000000
-      Bus = 1000001
-      Message = "must not exceed 1 MHz"
-    }
+  foreach ($resetCase in 0..8) {
+    $resetMarker = "lm_i2c_master reset case passed: $resetCase"
+    Write-Host "Running reset case $resetCase"
+    Invoke-GhdlWithMarker `
+      -Marker $resetMarker `
+      -OutputFile (Join-Path $workRoot "reset-$resetCase.txt") `
+      -Arguments @(
+        "-r",
+        "--std=08",
+        "--workdir=$simWork",
+        "tb_lm_i2c_master_reset",
+        "-gg_reset_case=$resetCase",
+        "--assert-level=error",
+        "--stop-time=$StopTime"
+      )
+  }
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "g_i2c_freq_hz must not exceed 400 kHz" `
+    -OutputFile (Join-Path $workRoot "invalid-frequency.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_master_invalid",
+      "-gg_clk_freq_hz=10000000",
+      "-gg_i2c_freq_hz=400001",
+      "--assert-level=error"
+    )
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "g_clk_freq_hz must be at least eight times g_i2c_freq_hz" `
+    -OutputFile (Join-Path $workRoot "invalid-ratio.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_master_invalid",
+      "-gg_clk_freq_hz=700000",
+      "-gg_i2c_freq_hz=100000",
+      "--assert-level=error"
+    )
+
+  Write-Host (
+    "All I2C master regressions and the " +
+      "VHDL-93 synthesis check passed."
   )
-
-  foreach ($invalidCase in $invalidCases) {
-    $output = & $Ghdl "-r" "--std=08" "--workdir=$simWork" `
-      "tb_lm_i2c_master_invalid" `
-      "-gg_clk_freq_hz=$($invalidCase.Clock)" `
-      "-gg_i2c_freq_hz=$($invalidCase.Bus)" `
-      "--assert-level=error" 2>&1
-    if ($LASTEXITCODE -eq 0) {
-      throw "Invalid generic configuration was unexpectedly accepted."
-    }
-    if (($output | Out-String) -notmatch [regex]::Escape($invalidCase.Message)) {
-      $output | Write-Error
-      throw "Invalid generic check failed for an unexpected reason."
-    }
-  }
-
-  Write-Host "All I2C master regressions and the VHDL-93 synthesis check passed."
 }
 finally {
-  Pop-Location
+  if ($locationPushed) {
+    Pop-Location
+  }
+  if (Test-Path -LiteralPath $workRoot) {
+    Remove-Item -LiteralPath $workRoot -Recurse -Force
+  }
 }
 
 exit 0

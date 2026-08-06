@@ -3,8 +3,6 @@ name: ci
 on:
   push:
   pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -15,22 +13,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  hygiene:
-    name: hygiene
+  hygiene-ubuntu:
+    name: Repository hygiene (Ubuntu)
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Check repository hygiene
-        shell: pwsh
-        run: ./tools/check_repo_hygiene.ps1 -Mode Full
+      - name: Run Bash content hygiene
+        shell: bash
+        run: bash tools/check_repo_hygiene.sh --full
 
-  ghdl:
-    name: ghdl
+      - name: Run Bash tracked-path hygiene
+        shell: bash
+        run: bash tools/check_repo_hygiene.sh --tracked-paths
+
+      - name: Run Bash history hygiene
+        shell: bash
+        run: bash tools/check_repo_hygiene.sh --history --revision-range HEAD
+
+      - name: Test Bash commit-message policy
+        shell: bash
+        run: |
+          clean_message=$(mktemp "$RUNNER_TEMP/lm_i2c-clean.XXXXXX")
+          blocked_message=$(mktemp "$RUNNER_TEMP/lm_i2c-blocked.XXXXXX")
+          cleanup() {
+            rm -f -- "$clean_message" "$blocked_message"
+          }
+          trap cleanup EXIT
+
+          printf '%s\n' "ci: validate repository hygiene" >"$clean_message"
+          bash tools/check_repo_hygiene.sh \
+            --commit-message-file "$clean_message"
+
+          printf '%s\n' 'Generated'"-by: controlled check" >"$blocked_message"
+          if bash tools/check_repo_hygiene.sh \
+            --commit-message-file "$blocked_message"; then
+            printf '%s\n' "Blocked commit message was unexpectedly accepted." >&2
+            exit 1
+          fi
+
+  regression-ubuntu:
+    name: VHDL regression (Ubuntu)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +72,93 @@ jobs:
           version: 6.0.0
           backend: mcode
 
-      - name: Run regression and synthesis check
+      - name: Run Bash regression
+        shell: bash
+        run: bash sim/run_ghdl.sh
+
+  hygiene-windows:
+    name: Repository hygiene (Windows)
+    runs-on: windows-2025
+    defaults:
+      run:
         shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run PowerShell content hygiene
+        run: ./tools/check_repo_hygiene.ps1 -Mode Full
+
+      - name: Run PowerShell tracked-path hygiene
+        run: ./tools/check_repo_hygiene.ps1 -Mode Tracked
+
+      - name: Run PowerShell history hygiene
+        run: |
+          ./tools/check_repo_hygiene.ps1 `
+            -Mode History `
+            -RevisionRange HEAD
+
+      - name: Test PowerShell commit-message policy
+        run: |
+          $cleanMessage = Join-Path $env:RUNNER_TEMP "lm_i2c-clean.txt"
+          $blockedMessage = Join-Path $env:RUNNER_TEMP "lm_i2c-blocked.txt"
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+          try {
+            [IO.File]::WriteAllText(
+              $cleanMessage,
+              "ci: validate repository hygiene`n",
+              $utf8NoBom
+            )
+            & pwsh -NoLogo -NoProfile -File `
+              ./tools/check_repo_hygiene.ps1 `
+              -Mode CommitMessage `
+              -CommitMessageFile $cleanMessage
+            $cleanExitCode = $LASTEXITCODE
+            if ($cleanExitCode -ne 0) {
+              throw "Clean commit message was rejected."
+            }
+
+            [IO.File]::WriteAllText(
+              $blockedMessage,
+              ("Generated" + "-by: controlled check`n"),
+              $utf8NoBom
+            )
+            & pwsh -NoLogo -NoProfile -File `
+              ./tools/check_repo_hygiene.ps1 `
+              -Mode CommitMessage `
+              -CommitMessageFile $blockedMessage
+            $blockedExitCode = $LASTEXITCODE
+            if ($blockedExitCode -ne 1) {
+              throw "Blocked commit message did not return exit code 1."
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $cleanMessage, $blockedMessage `
+              -Force -ErrorAction SilentlyContinue
+          }
+
+  regression-windows:
+    name: VHDL regression (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up GHDL
+        uses: ghdl/setup-ghdl@75eff367dadc0cd06454a118db0b458d44fdc3c3 # v1.5.1
+        with:
+          version: 6.0.0
+          backend: mcode
+
+      - name: Run native PowerShell regression
         run: ./sim/run_ghdl.ps1
