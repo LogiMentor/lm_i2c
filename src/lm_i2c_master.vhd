@@ -26,13 +26,17 @@ entity lm_i2c_master is
     clk_i   : in std_logic;
     rst_n_i : in std_logic;
 
+    -- Reset-time bus qualification policy
+    bus_assume_free_i : in std_logic;
+
     -- Byte-command input
-    cmd_valid_i : in std_logic;
-    cmd_start_i : in std_logic;
-    cmd_stop_i  : in std_logic;
-    cmd_read_i  : in std_logic;
-    cmd_data_i  : in std_logic_vector(7 downto 0);
-    cmd_nack_i  : in std_logic;
+    cmd_valid_i     : in std_logic;
+    cmd_start_i     : in std_logic;
+    cmd_stop_i      : in std_logic;
+    cmd_stop_only_i : in std_logic;
+    cmd_read_i      : in std_logic;
+    cmd_data_i      : in std_logic_vector(7 downto 0);
+    cmd_nack_i      : in std_logic;
 
     -- Response consumption
     rsp_ready_i : in std_logic;
@@ -163,12 +167,19 @@ architecture a_rtl of lm_i2c_master is
     f_high_cycles(C_PERIOD_CYCLES, C_LOW_CYCLES, C_HIGH_MIN_CYCLES);
   constant C_LOW_REMAIN : positive :=
     C_LOW_CYCLES - C_DATA_HOLD;
+  constant C_REPEAT_HIGH_CYCLES : positive :=
+    f_max(C_HIGH_CYCLES, C_START_SETUP + C_START_HOLD);
+  constant C_REPEAT_SETUP : positive :=
+    C_REPEAT_HIGH_CYCLES - C_START_HOLD;
   constant C_TIMER_MAX : positive :=
     f_max(
       f_max(C_PERIOD_CYCLES, C_BUF_CYCLES),
       f_max(
-        f_max(C_START_SETUP, C_START_HOLD),
-        f_max(C_STOP_SETUP, C_LOW_CYCLES)
+        f_max(C_REPEAT_SETUP, C_START_HOLD),
+        f_max(
+          C_STOP_SETUP,
+          f_max(C_LOW_CYCLES, C_HIGH_CYCLES)
+        )
       )
     );
 
@@ -200,6 +211,7 @@ architecture a_rtl of lm_i2c_master is
     st_rack_high,
     st_rdone_hold,
     st_rdone_setup,
+    st_stop_only_low,
     st_stop_wait,
     st_stop_setup,
     st_response
@@ -220,9 +232,10 @@ architecture a_rtl of lm_i2c_master is
   signal s_sda_meta : std_logic;
   signal s_sda_sync : std_logic;
   signal s_sda_prev : std_logic;
+  signal s_sync_ready : natural range 0 to 2;
 
   signal s_bus_busy  : std_logic;
-  signal s_need_stop : std_logic;
+  signal s_stop_seen : std_logic;
   signal s_free_cnt  : natural range 0 to C_BUF_CYCLES;
   signal s_owned     : std_logic;
 
@@ -251,9 +264,17 @@ begin
     report "derived SCL LOW interval leaves insufficient data setup time"
     severity failure;
 
+  assert C_REPEAT_SETUP >= C_START_SETUP
+    report "derived repeated-START setup interval is below the mode minimum"
+    severity failure;
+
+  assert C_REPEAT_SETUP + C_START_HOLD >= C_HIGH_CYCLES
+    report "derived repeated-START HIGH interval is faster than requested"
+    severity failure;
+
   cmd_ready_o <= '1' when s_state = st_idle else '0';
   busy_o      <= '0' when s_state = st_idle or s_state = st_response else '1';
-  bus_busy_o  <= s_bus_busy;
+  bus_busy_o  <= s_bus_busy or s_owned;
   scl_low_o   <= s_scl_low;
   sda_low_o   <= s_sda_low;
 
@@ -265,11 +286,15 @@ begin
         s_scl_sync <= '1';
         s_sda_meta <= '1';
         s_sda_sync <= '1';
+        s_sync_ready <= 0;
       else
         s_scl_meta <= scl_i;
         s_scl_sync <= s_scl_meta;
         s_sda_meta <= sda_i;
         s_sda_sync <= s_sda_meta;
+        if s_sync_ready < 2 then
+          s_sync_ready <= s_sync_ready + 1;
+        end if;
       end if;
     end if;
   end process proc_sync_inputs;
@@ -280,34 +305,43 @@ begin
       if rst_n_i = '0' then
         s_sda_prev  <= '1';
         s_bus_busy  <= '1';
-        s_need_stop <= '0';
+        s_stop_seen <= '0';
         s_free_cnt  <= 0;
       else
-        if s_owned = '1' then
+        if s_sync_ready < 2 then
           s_bus_busy <= '1';
+          s_stop_seen <= '0';
+          s_free_cnt <= 0;
+        elsif s_owned = '1' then
+          s_bus_busy <= '1';
+          s_stop_seen <= '0';
           s_free_cnt <= 0;
         elsif s_scl_sync = '1' and
               s_sda_prev = '1' and s_sda_sync = '0' then
           s_bus_busy  <= '1';
-          s_need_stop <= '1';
+          s_stop_seen <= '0';
           s_free_cnt  <= 0;
         elsif s_scl_sync = '1' and
               s_sda_prev = '0' and s_sda_sync = '1' then
           s_bus_busy  <= '1';
-          s_need_stop <= '0';
+          s_stop_seen <= '1';
           s_free_cnt  <= 0;
         elsif s_scl_sync = '0' or s_sda_sync = '0' then
           s_bus_busy  <= '1';
-          s_need_stop <= '1';
+          s_stop_seen <= '0';
           s_free_cnt  <= 0;
-        elsif s_need_stop = '1' then
+        elsif s_bus_busy = '0' then
+          s_free_cnt <= C_BUF_CYCLES;
+        elsif s_stop_seen = '1' or bus_assume_free_i = '1' then
+          if s_free_cnt = C_BUF_CYCLES - 1 then
+            s_bus_busy <= '0';
+            s_free_cnt <= C_BUF_CYCLES;
+          elsif s_free_cnt < C_BUF_CYCLES then
+            s_free_cnt <= s_free_cnt + 1;
+          end if;
+        else
           s_bus_busy <= '1';
           s_free_cnt <= 0;
-        elsif s_free_cnt = C_BUF_CYCLES - 1 then
-          s_bus_busy <= '0';
-          s_free_cnt <= C_BUF_CYCLES;
-        elsif s_free_cnt < C_BUF_CYCLES then
-          s_free_cnt <= s_free_cnt + 1;
         end if;
         s_sda_prev <= s_sda_sync;
       end if;
@@ -349,7 +383,16 @@ begin
               rsp_arb_lost_o  <= '0';
               rsp_cmd_error_o <= '0';
 
-              if cmd_start_i = '1' and s_owned = '0' then
+              if cmd_stop_only_i = '1' and s_owned = '0' then
+                rsp_cmd_error_o <= '1';
+                rsp_valid_o     <= '1';
+                s_state         <= st_response;
+              elsif cmd_stop_only_i = '1' then
+                s_scl_low <= '1';
+                s_sda_low <= '1';
+                s_timer   <= C_DATA_SETUP - 1;
+                s_state   <= st_stop_only_low;
+              elsif cmd_start_i = '1' and s_owned = '0' then
                 s_scl_low <= '0';
                 s_sda_low <= '0';
                 s_state   <= st_wait_free;
@@ -403,7 +446,7 @@ begin
 
           when st_rep_wait =>
             if s_scl_sync = '1' then
-              s_timer <= C_START_SETUP - 1;
+              s_timer <= C_REPEAT_SETUP - 1;
               s_state <= st_rep_setup;
             end if;
 
@@ -656,6 +699,14 @@ begin
               s_timer <= s_timer - 1;
             end if;
 
+          when st_stop_only_low =>
+            if s_timer = 0 then
+              s_scl_low <= '0';
+              s_state   <= st_stop_wait;
+            else
+              s_timer <= s_timer - 1;
+            end if;
+
           when st_stop_wait =>
             if s_scl_sync = '1' then
               s_timer <= C_STOP_SETUP - 1;
@@ -679,6 +730,7 @@ begin
             end if;
 
           when others =>
+            -- Defensive recovery for an invalid or corrupted state encoding.
             s_scl_low        <= '0';
             s_sda_low        <= '0';
             s_owned          <= '0';

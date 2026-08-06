@@ -39,9 +39,11 @@ begin
     port map (
       clk_i           => s_clk,
       rst_n_i         => '0',
+      bus_assume_free_i => '0',
       cmd_valid_i     => '0',
       cmd_start_i     => '0',
       cmd_stop_i      => '0',
+      cmd_stop_only_i => '0',
       cmd_read_i      => '0',
       cmd_data_i      => (others => '0'),
       cmd_nack_i      => '1',

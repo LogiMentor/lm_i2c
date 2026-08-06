@@ -176,8 +176,12 @@ try {
   )
 
   $testCases = @(
+    @{ Clock = 10000000; Bus = 50000 },
     @{ Clock = 10000000; Bus = 100000 },
     @{ Clock = 12000000; Bus = 100000 },
+    @{ Clock = 10000000; Bus = 137000 },
+    @{ Clock = 10000000; Bus = 200000 },
+    @{ Clock = 10000000; Bus = 333000 },
     @{ Clock = 10000000; Bus = 400000 },
     @{ Clock = 50000000; Bus = 400000 }
   )
@@ -204,7 +208,7 @@ try {
       )
   }
 
-  foreach ($resetCase in 0..8) {
+  foreach ($resetCase in 0..14) {
     $resetMarker = "lm_i2c_master reset case passed: $resetCase"
     Write-Host "Running reset case $resetCase"
     Invoke-GhdlWithMarker `

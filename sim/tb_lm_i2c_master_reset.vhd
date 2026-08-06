@@ -32,18 +32,23 @@ architecture a_tb of tb_lm_i2c_master_reset is
   constant C_CLK_PERIOD   : time :=
     2 * ((1 sec / C_CLK_FREQ_HZ + 2 fs) / 2);
   constant C_DATA_HOLD    : time := 300 ns;
+  constant C_T_LOW        : time := 1.3 us;
+  constant C_T_BUF        : time := 1.3 us;
+  constant C_T_SU_STO     : time := 600 ns;
   constant C_WATCHDOG     : time := 2 ms;
 
   signal s_clk   : std_logic := '0';
   signal s_rst_n : std_logic := '0';
+  signal s_bus_assume_free : std_logic := '1';
 
-  signal s_cmd_valid : std_logic := '0';
-  signal s_cmd_start : std_logic := '0';
-  signal s_cmd_stop  : std_logic := '0';
-  signal s_cmd_read  : std_logic := '0';
-  signal s_cmd_data  : std_logic_vector(7 downto 0) := (others => '0');
-  signal s_cmd_nack  : std_logic := '1';
-  signal s_cmd_ready : std_logic;
+  signal s_cmd_valid     : std_logic := '0';
+  signal s_cmd_start     : std_logic := '0';
+  signal s_cmd_stop      : std_logic := '0';
+  signal s_cmd_stop_only : std_logic := '0';
+  signal s_cmd_read      : std_logic := '0';
+  signal s_cmd_data      : std_logic_vector(7 downto 0) := (others => '0');
+  signal s_cmd_nack      : std_logic := '1';
+  signal s_cmd_ready     : std_logic;
 
   signal s_rsp_ready     : std_logic := '0';
   signal s_rsp_valid     : std_logic;
@@ -72,8 +77,8 @@ architecture a_tb of tb_lm_i2c_master_reset is
 
 begin
 
-  assert g_reset_case <= 8
-    report "g_reset_case must be in the range 0 through 8"
+  assert g_reset_case <= 14
+    report "g_reset_case must be in the range 0 through 14"
     severity failure;
 
   s_scl <= '0' when
@@ -91,9 +96,11 @@ begin
     port map (
       clk_i           => s_clk,
       rst_n_i         => s_rst_n,
+      bus_assume_free_i => s_bus_assume_free,
       cmd_valid_i     => s_cmd_valid,
       cmd_start_i     => s_cmd_start,
       cmd_stop_i      => s_cmd_stop,
+      cmd_stop_only_i => s_cmd_stop_only,
       cmd_read_i      => s_cmd_read,
       cmd_data_i      => s_cmd_data,
       cmd_nack_i      => s_cmd_nack,
@@ -127,7 +134,8 @@ begin
       constant stop_cmd  : in boolean;
       constant read_cmd  : in boolean;
       constant data      : in std_logic_vector(7 downto 0);
-      constant nack      : in std_logic
+      constant nack      : in std_logic;
+      constant stop_only : in boolean := false
     ) is
     begin
       wait until rising_edge(s_clk) and s_cmd_ready = '1';
@@ -146,6 +154,11 @@ begin
       else
         s_cmd_read <= '0';
       end if;
+      if stop_only then
+        s_cmd_stop_only <= '1';
+      else
+        s_cmd_stop_only <= '0';
+      end if;
       s_cmd_data  <= data;
       s_cmd_nack  <= nack;
       s_cmd_valid <= '1';
@@ -153,6 +166,7 @@ begin
       s_cmd_valid <= '0';
       s_cmd_start <= '0';
       s_cmd_stop  <= '0';
+      s_cmd_stop_only <= '0';
       s_cmd_read  <= '0';
       wait for 0 ns;
       wait for 0 ns;
@@ -247,6 +261,7 @@ begin
 
       s_peer_scl_low <= '0';
       s_peer_sda_low <= '0';
+      s_bus_assume_free <= '1';
       wait until rising_edge(s_clk);
       s_rst_n <= '1';
       wait until rising_edge(s_clk);
@@ -261,8 +276,13 @@ begin
     end procedure p_check_reset_abort;
 
   begin
-    if g_reset_case = 0 then
+    if g_reset_case = 0 or g_reset_case = 9 or g_reset_case = 11 then
       s_peer_scl_low <= '1';
+    end if;
+    if g_reset_case = 9 or g_reset_case = 12 or g_reset_case = 13 then
+      s_bus_assume_free <= '0';
+    else
+      s_bus_assume_free <= '1';
     end if;
 
     s_rst_n <= '0';
@@ -270,7 +290,122 @@ begin
     wait until rising_edge(s_clk);
     s_rst_n <= '1';
 
-    if g_reset_case = 0 then
+    if g_reset_case = 9 then
+      p_launch(true, false, false, x"A0", '1');
+      wait for 3 * C_T_BUF;
+      assert s_bus_busy = '1' and s_dut_scl_low = '0' and
+             s_dut_sda_low = '0'
+        report "assume-free LOW case qualified or intruded on the bus"
+        severity failure;
+
+      -- A foreign logic-one HIGH phase is not proof of an idle bus.
+      s_peer_scl_low <= '0';
+      wait for 3 * C_T_BUF;
+      assert s_bus_busy = '1' and s_dut_scl_low = '0' and
+             s_dut_sda_low = '0'
+        report "foreign HIGH logic-one phase was mistaken for bus free"
+        severity failure;
+
+      -- Only a synchronized foreign STOP now permits tBUF qualification.
+      s_peer_scl_low <= '1';
+      s_peer_sda_low <= '1';
+      wait for C_T_LOW;
+      s_peer_scl_low <= '0';
+      wait until s_scl = '1';
+      wait for C_T_SU_STO;
+      s_peer_sda_low <= '0';
+      p_wait_start(s_scl, s_sda);
+      assert s_bus_busy = '1'
+        report "bus_busy_o was LOW when the pending START claimed the bus"
+        severity failure;
+      s_rst_n <= '0';
+      wait until rising_edge(s_clk);
+
+    elsif g_reset_case = 10 then
+      wait for C_T_BUF - C_CLK_PERIOD;
+      assert s_bus_busy = '1'
+        report "assume-free qualification completed before tBUF"
+        severity failure;
+      p_wait_bus_free;
+      p_launch(true, false, false, x"A0", '1');
+      p_wait_start(s_scl, s_sda);
+      assert s_bus_busy = '1'
+        report "assumed-free START did not assert bus_busy_o immediately"
+        severity failure;
+      s_rst_n <= '0';
+      wait until rising_edge(s_clk);
+
+    elsif g_reset_case = 11 then
+      wait for 3 * C_T_BUF;
+      assert s_bus_busy = '1' and s_dut_scl_low = '0' and
+             s_dut_sda_low = '0'
+        report "assume-free qualified while SCL was LOW"
+        severity failure;
+
+      s_rst_n <= '0';
+      wait until rising_edge(s_clk);
+      s_peer_scl_low <= '0';
+      s_peer_sda_low <= '1';
+      wait until rising_edge(s_clk);
+      s_rst_n <= '1';
+      wait for 3 * C_T_BUF;
+      assert s_bus_busy = '1' and s_dut_scl_low = '0' and
+             s_dut_sda_low = '0'
+        report "assume-free qualified while SDA was LOW"
+        severity failure;
+
+    elsif g_reset_case = 12 then
+      s_bus_assume_free <= '1';
+      p_wait_bus_free;
+      assert s_bus_busy = '0'
+        report "precondition bus qualification failed"
+        severity failure;
+      s_rst_n <= '0';
+      wait until rising_edge(s_clk);
+      wait for 0 ns;
+      wait for 0 ns;
+      assert s_bus_busy = '1'
+        report "reset did not clear previous bus qualification"
+        severity failure;
+      s_bus_assume_free <= '0';
+      s_rst_n <= '1';
+      wait for 3 * C_T_BUF;
+      assert s_bus_busy = '1'
+        report "reset qualification leaked without STOP or assumption"
+        severity failure;
+
+    elsif g_reset_case = 13 then
+      wait for 2 * C_T_BUF;
+      assert s_bus_busy = '1'
+        report "unqualified HIGH bus became free without an observed STOP"
+        severity failure;
+      s_peer_sda_low <= '1';
+      wait for C_CLK_PERIOD;
+      s_peer_scl_low <= '1';
+      wait for C_T_LOW;
+      s_peer_scl_low <= '0';
+      wait until s_scl = '1';
+      wait for C_T_SU_STO;
+      s_peer_sda_low <= '0';
+      p_wait_bus_free;
+      assert s_bus_busy = '0'
+        report "observed STOP did not qualify the bus without assumption"
+        severity failure;
+
+    elsif g_reset_case = 14 then
+      p_wait_bus_free;
+      p_establish_ownership;
+      s_peer_scl_low <= '1';
+      p_launch(true, true, true, x"FF", '0', true);
+      if s_dut_scl_low /= '0' then
+        wait until s_dut_scl_low = '0';
+      end if;
+      assert s_scl = '0'
+        report "STOP-only reset case did not reach stretched STOP wait"
+        severity failure;
+      p_check_reset_abort;
+
+    elsif g_reset_case = 0 then
       p_launch(true, false, false, x"A0", '1');
       wait for 4 * C_CLK_PERIOD;
       assert s_busy = '1' and s_dut_scl_low = '0' and

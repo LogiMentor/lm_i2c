@@ -107,8 +107,12 @@ run_expected_failure() {
 
 config_index=0
 for config in \
+  "10000000 50000" \
   "10000000 100000" \
   "12000000 100000" \
+  "10000000 137000" \
+  "10000000 200000" \
+  "10000000 333000" \
   "10000000 400000" \
   "50000000 400000"; do
   read -r clock_hz bus_hz <<<"$config"
@@ -123,7 +127,7 @@ for config in \
   config_index=$((config_index + 1))
 done
 
-for reset_case in {0..8}; do
+for reset_case in {0..14}; do
   reset_marker="lm_i2c_master reset case passed: $reset_case"
   printf 'Running reset case %s\n' "$reset_case"
   run_with_marker "$reset_marker" "$work_root/reset-$reset_case.txt" \

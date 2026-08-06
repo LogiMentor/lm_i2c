@@ -139,19 +139,21 @@ architecture a_tb of tb_lm_i2c_master is
     f_max_time(C_T_HIGH, C_REQ_PERIOD - C_T_LOW);
   constant C_ARB_RELEASE_CHECK : time :=
     C_T_SU_STO / 2 + 4 * C_CLK_PERIOD;
-  constant C_STRETCH_TIME : time := 3 * C_T_HIGH + 4 * C_CLK_PERIOD;
+  constant C_STRETCH_TIME : time := 3 * C_CTRL_HIGH + 4 * C_CLK_PERIOD;
   constant C_WATCHDOG : time := 20 ms;
 
   signal s_clk   : std_logic := '0';
   signal s_rst_n : std_logic := '0';
+  signal s_bus_assume_free : std_logic := '0';
 
-  signal s_cmd_valid : std_logic := '0';
-  signal s_cmd_start : std_logic := '0';
-  signal s_cmd_stop  : std_logic := '0';
-  signal s_cmd_read  : std_logic := '0';
-  signal s_cmd_data  : std_logic_vector(7 downto 0) := (others => '0');
-  signal s_cmd_nack  : std_logic := '1';
-  signal s_cmd_ready : std_logic;
+  signal s_cmd_valid     : std_logic := '0';
+  signal s_cmd_start     : std_logic := '0';
+  signal s_cmd_stop      : std_logic := '0';
+  signal s_cmd_stop_only : std_logic := '0';
+  signal s_cmd_read      : std_logic := '0';
+  signal s_cmd_data      : std_logic_vector(7 downto 0) := (others => '0');
+  signal s_cmd_nack      : std_logic := '1';
+  signal s_cmd_ready     : std_logic;
 
   signal s_rsp_ready     : std_logic := '0';
   signal s_rsp_valid     : std_logic;
@@ -189,6 +191,11 @@ architecture a_tb of tb_lm_i2c_master is
   signal s_min_period    : time := 1 sec;
   signal s_min_data_hold : time := 1 sec;
   signal s_rep_low       : time := 0 ns;
+  signal s_rep_setup     : time := 0 ns;
+  signal s_rep_hold      : time := 0 ns;
+  signal s_rep_high      : time := 0 ns;
+  signal s_scl_rises     : natural := 0;
+  signal s_scl_falls     : natural := 0;
 
   procedure p_wait_start (
     signal scl : in std_logic;
@@ -228,7 +235,8 @@ architecture a_tb of tb_lm_i2c_master is
     constant expected     : in  std_logic_vector(7 downto 0);
     constant drive_ack    : in  boolean;
     constant stretch_bit  : in  integer := -1;
-    constant stretch_ack  : in  boolean := false
+    constant stretch_ack  : in  boolean := false;
+    constant late_ack     : in  boolean := false
   ) is
   begin
     for v_bit in 7 downto 0 loop
@@ -242,21 +250,39 @@ architecture a_tb of tb_lm_i2c_master is
       wait until falling_edge(scl);
     end loop;
 
-    if stretch_ack then
+    if stretch_ack or late_ack then
       peer_scl_low <= '1';
     end if;
     wait for C_T_HD_DAT;
-    if drive_ack then
-      peer_sda_low <= '1';
-    else
-      peer_sda_low <= '0';
-    end if;
-    if stretch_ack then
+    if late_ack then
+      if drive_ack then
+        peer_sda_low <= '0';
+      else
+        peer_sda_low <= '1';
+      end if;
       if dut_scl_low /= '0' then
         wait until dut_scl_low = '0';
       end if;
-      wait for C_STRETCH_TIME;
+      if drive_ack then
+        peer_sda_low <= '1';
+      else
+        peer_sda_low <= '0';
+      end if;
+      wait for C_T_SU_DAT;
       peer_scl_low <= '0';
+    else
+      if drive_ack then
+        peer_sda_low <= '1';
+      else
+        peer_sda_low <= '0';
+      end if;
+      if stretch_ack then
+        if dut_scl_low /= '0' then
+          wait until dut_scl_low = '0';
+        end if;
+        wait for C_STRETCH_TIME;
+        peer_scl_low <= '0';
+      end if;
     end if;
 
     wait until rising_edge(scl);
@@ -279,18 +305,39 @@ architecture a_tb of tb_lm_i2c_master is
     constant value        : in  std_logic_vector(7 downto 0);
     constant expect_ack   : in  boolean;
     constant stretch_bit  : in  integer := -1;
-    constant stretch_ack  : in  boolean := false
+    constant stretch_ack  : in  boolean := false;
+    constant late_data    : in  boolean := false
   ) is
   begin
     for v_bit in 7 downto 0 loop
-      wait for C_T_HD_DAT;
-      if value(v_bit) = '0' then
-        peer_sda_low <= '1';
+      if late_data then
+        peer_scl_low <= '1';
+        wait for C_T_HD_DAT;
+        if value(v_bit) = '0' then
+          peer_sda_low <= '0';
+        else
+          peer_sda_low <= '1';
+        end if;
+        if dut_scl_low /= '0' then
+          wait until dut_scl_low = '0';
+        end if;
+        if value(v_bit) = '0' then
+          peer_sda_low <= '1';
+        else
+          peer_sda_low <= '0';
+        end if;
+        wait for C_T_SU_DAT;
+        peer_scl_low <= '0';
       else
-        peer_sda_low <= '0';
-      end if;
-      if v_bit = stretch_bit then
-        p_stretch_next_high(dut_scl_low, peer_scl_low);
+        wait for C_T_HD_DAT;
+        if value(v_bit) = '0' then
+          peer_sda_low <= '1';
+        else
+          peer_sda_low <= '0';
+        end if;
+        if v_bit = stretch_bit then
+          p_stretch_next_high(dut_scl_low, peer_scl_low);
+        end if;
       end if;
       wait until rising_edge(scl);
       wait until falling_edge(scl);
@@ -336,6 +383,10 @@ architecture a_tb of tb_lm_i2c_master is
 
 begin
 
+  assert C_STRETCH_TIME > 2 * C_CTRL_HIGH
+    report "directed stretch must exceed two requested HIGH phases"
+    severity failure;
+
   s_scl <= '0' when
     s_dut_scl_low = '1' or s_tgt_scl_low = '1' or s_oth_scl_low = '1'
     else '1';
@@ -351,9 +402,11 @@ begin
     port map (
       clk_i           => s_clk,
       rst_n_i         => s_rst_n,
+      bus_assume_free_i => s_bus_assume_free,
       cmd_valid_i     => s_cmd_valid,
       cmd_start_i     => s_cmd_start,
       cmd_stop_i      => s_cmd_stop,
+      cmd_stop_only_i => s_cmd_stop_only,
       cmd_read_i      => s_cmd_read,
       cmd_data_i      => s_cmd_data,
       cmd_nack_i      => s_cmd_nack,
@@ -380,11 +433,23 @@ begin
     wait for C_CLK_PERIOD / 2;
   end process proc_clock;
 
+  proc_bus_edge_counts : process(s_scl)
+  begin
+    if rising_edge(s_scl) then
+      s_scl_rises <= s_scl_rises + 1;
+    elsif falling_edge(s_scl) then
+      s_scl_falls <= s_scl_falls + 1;
+    end if;
+  end process proc_bus_edge_counts;
+
+  -- Only resolved-bus and arm events can change this event-driven monitor;
+  -- the other read signals are stable controls during each measured phase.
   proc_passive_monitor : process(
     s_monitor_armed, s_scl, s_sda
   )
     variable v_active         : boolean := false;
     variable v_pending_start  : boolean := false;
+    variable v_repeat_start   : boolean := false;
     variable v_last_scl_rise  : time := 0 ns;
     variable v_last_scl_fall  : time := 0 ns;
     variable v_last_sda_event : time := 0 ns;
@@ -404,6 +469,7 @@ begin
     if s_monitor_armed'event and s_monitor_armed = '1' then
       v_active         := s_context_busy = '1';
       v_pending_start  := false;
+      v_repeat_start   := false;
       v_last_scl_rise  := now;
       v_last_scl_fall  := now;
       v_last_sda_event := now;
@@ -464,7 +530,8 @@ begin
           assert v_high >= C_T_HIGH
             report "passive monitor detected short tHIGH: " & time'image(v_high)
             severity failure;
-          if s_measure_dut_timing = '1' then
+          if s_measure_dut_timing = '1' and
+             (not v_pending_start or v_repeat_start) then
             assert v_high >= C_EXPECT_HIGH
               report "passive monitor detected shortened derived HIGH phase: " &
                 time'image(v_high) & " expected " & time'image(C_EXPECT_HIGH)
@@ -478,7 +545,16 @@ begin
           assert now - v_last_sda_event >= C_T_HD_STA
             report "passive monitor detected short START hold"
             severity failure;
+          if v_repeat_start then
+            assert now - v_last_scl_rise >= C_EXPECT_HIGH
+              report "passive monitor detected repeated-START HIGH faster " &
+                "than requested"
+              severity failure;
+            s_rep_hold <= now - v_last_sda_event;
+            s_rep_high <= now - v_last_scl_rise;
+          end if;
           v_pending_start := false;
+          v_repeat_start  := false;
         end if;
         v_last_scl_fall := now;
         v_have_fall     := true;
@@ -498,6 +574,8 @@ begin
                 report "passive monitor detected collapsed repeated-START LOW"
                 severity failure;
               s_rep_low <= v_last_low;
+              s_rep_setup <= now - v_last_scl_rise;
+              v_repeat_start := true;
             elsif v_have_stop then
               assert now - v_last_stop >= C_T_BUF
                 report "passive monitor detected short bus-free time"
@@ -522,6 +600,9 @@ begin
             v_active     := false;
             v_last_stop  := now;
             v_have_stop  := true;
+            -- A STOP terminates the SCL slot sequence; the next rising edge
+            -- belongs to a new transfer rather than the preceding period.
+            v_have_rise  := false;
           end if;
         elsif v_have_fall then
           v_hold := now - v_last_scl_fall;
@@ -546,11 +627,18 @@ begin
              (s_dut_sda_low = '0' or s_dut_sda_low = '1')
         report "DUT open-drain control contains a non-binary value"
         severity failure;
+      if s_dut_scl_low = '1' or s_dut_sda_low = '1' then
+        assert s_bus_busy = '1'
+          report "bus_busy_o was LOW while the DUT drove or claimed the bus"
+          severity failure;
+      end if;
     end if;
   end process proc_bus_sanity;
 
   proc_target : process
     constant C_ARB_READ_DATA : std_logic_vector(7 downto 0) := x"F0";
+    variable v_rises_before_stop : natural;
+    variable v_falls_before_stop : natural;
   begin
     wait until s_target_phase = 1;
     p_wait_start(s_scl, s_sda);
@@ -575,7 +663,19 @@ begin
       s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
       x"A0", false, -1, true
     );
+    s_tgt_scl_low <= '1';
+    v_rises_before_stop := s_scl_rises;
+    v_falls_before_stop := s_scl_falls;
+    if s_dut_scl_low /= '0' then
+      wait until s_dut_scl_low = '0';
+    end if;
+    wait for C_STRETCH_TIME;
+    s_tgt_scl_low <= '0';
     p_wait_stop(s_scl, s_sda);
+    assert s_scl_rises = v_rises_before_stop + 1 and
+           s_scl_falls = v_falls_before_stop
+      report "STOP-only after address NACK emitted byte clocks"
+      severity failure;
 
     wait until s_target_phase = 3;
     p_wait_start(s_scl, s_sda);
@@ -587,6 +687,12 @@ begin
       s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
       x"55", true
     );
+    s_tgt_scl_low <= '1';
+    if s_dut_scl_low /= '0' then
+      wait until s_dut_scl_low = '0';
+    end if;
+    wait for C_STRETCH_TIME;
+    s_tgt_scl_low <= '0';
     p_wait_start(s_scl, s_sda);
     p_receive_byte(
       s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
@@ -607,11 +713,42 @@ begin
     p_wait_start(s_scl, s_sda);
     p_receive_byte(
       s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
-      x"A1", true
+      x"A1", true, -1, false, true
     );
     p_send_byte(
       s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
-      x"5A", false
+      x"5A", false, -1, false, true
+    );
+    p_wait_stop(s_scl, s_sda);
+
+    wait until s_target_phase = 6;
+    p_wait_start(s_scl, s_sda);
+    p_receive_byte(
+      s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
+      x"A0", true
+    );
+    p_receive_byte(
+      s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
+      x"6D", false
+    );
+    v_rises_before_stop := s_scl_rises;
+    v_falls_before_stop := s_scl_falls;
+    p_wait_stop(s_scl, s_sda);
+    assert s_scl_rises = v_rises_before_stop + 1 and
+           s_scl_falls = v_falls_before_stop
+      report "STOP-only after data NACK emitted byte clocks"
+      severity failure;
+
+    wait until s_target_phase = 7;
+    p_wait_start(s_scl, s_sda);
+    p_receive_byte(
+      s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
+      x"A0", true
+    );
+    p_wait_start(s_scl, s_sda);
+    p_receive_byte(
+      s_scl, s_sda, s_dut_scl_low, s_tgt_scl_low, s_tgt_sda_low,
+      x"A2", true
     );
     p_wait_stop(s_scl, s_sda);
 
@@ -748,7 +885,8 @@ begin
       constant stop_cmd  : in boolean;
       constant read_cmd  : in boolean;
       constant data      : in std_logic_vector(7 downto 0);
-      constant nack      : in std_logic
+      constant nack      : in std_logic;
+      constant stop_only : in boolean := false
     ) is
     begin
       wait until rising_edge(s_clk) and s_cmd_ready = '1';
@@ -767,6 +905,11 @@ begin
       else
         s_cmd_read <= '0';
       end if;
+      if stop_only then
+        s_cmd_stop_only <= '1';
+      else
+        s_cmd_stop_only <= '0';
+      end if;
       s_cmd_data  <= data;
       s_cmd_nack  <= nack;
       s_cmd_valid <= '1';
@@ -774,6 +917,7 @@ begin
       s_cmd_valid <= '0';
       s_cmd_start <= '0';
       s_cmd_stop  <= '0';
+      s_cmd_stop_only <= '0';
       s_cmd_read  <= '0';
       wait for 0 ns;
       wait for 0 ns;
@@ -915,9 +1059,14 @@ begin
     -- Write NACK.
     s_target_phase <= 2;
     p_allow_start;
-    p_allow_stop;
-    p_launch(true, true, false, x"A0", '1');
+    p_launch(true, false, false, x"A0", '1');
     p_wait_response(x"00", '1', '0', '0');
+    assert s_bus_busy = '1'
+      report "address NACK unexpectedly cleared controller ownership"
+      severity failure;
+    p_allow_stop;
+    p_launch(true, true, true, x"FF", '0', true);
+    p_wait_response(x"00", '0', '0', '0', 5);
     p_wait_bus_free;
 
     -- Combined register read with repeated START and two read bytes.
@@ -929,6 +1078,9 @@ begin
     p_wait_response(x"00", '0', '0', '0');
     p_allow_start;
     p_launch(true, false, false, x"A1", '1');
+    assert s_bus_busy = '1'
+      report "bus_busy_o fell during repeated-START ownership"
+      severity failure;
     p_wait_response(x"00", '0', '0', '0');
     p_launch(false, false, true, x"00", '0');
     p_wait_response(x"3C", '0', '0', '0', 4);
@@ -947,11 +1099,37 @@ begin
     p_wait_response(x"5A", '0', '0', '0');
     p_wait_bus_free;
 
-    -- A command without START is illegal when this controller has no ownership.
-    p_launch(false, false, false, x"99", '1');
+    -- A data NACK also leaves ownership available for a STOP-only command.
+    s_target_phase <= 6;
+    p_allow_start;
+    p_launch(true, false, false, x"A0", '1');
+    p_wait_response(x"00", '0', '0', '0');
+    p_launch(false, false, false, x"6D", '1');
+    p_wait_response(x"00", '1', '0', '0');
+    assert s_bus_busy = '1'
+      report "data NACK unexpectedly cleared controller ownership"
+      severity failure;
+    p_allow_stop;
+    p_launch(true, true, true, x"FF", '0', true);
+    p_wait_response(x"00", '0', '0', '0', 3);
+    p_wait_bus_free;
+
+    -- An unstretched repeated START keeps a full preparation LOW interval.
+    s_target_phase <= 7;
+    p_allow_start;
+    p_launch(true, false, false, x"A0", '1');
+    p_wait_response(x"00", '0', '0', '0');
+    p_allow_start;
+    p_allow_stop;
+    p_launch(true, true, false, x"A2", '1');
+    p_wait_response(x"00", '0', '0', '0');
+    p_wait_bus_free;
+
+    -- STOP-only ignores every byte field but requires local ownership.
+    p_launch(true, true, true, x"99", '0', true);
     p_wait_response(x"00", '0', '0', '1', 5);
     assert s_scl = '1' and s_sda = '1'
-      report "illegal command caused bus activity"
+      report "illegal STOP-only command caused bus activity"
       severity failure;
 
     -- Reset removes a backpressured response without leaving stale status.
@@ -973,6 +1151,7 @@ begin
       report "reset did not release open-drain controls"
       severity failure;
     s_rst_n <= '1';
+    s_bus_assume_free <= '1';
     p_wait_bus_free;
     assert s_rsp_valid = '0'
       report "stale response appeared after reset"
@@ -1056,12 +1235,19 @@ begin
     assert s_rep_low >= 2 * C_EXPECT_LOW
       report "repeated-START LOW measurement was not captured"
       severity failure;
+    assert s_rep_setup >= C_T_SU_STA and s_rep_hold >= C_T_HD_STA and
+           s_rep_high >= C_EXPECT_HIGH
+      report "repeated-START HIGH timing was not fully captured"
+      severity failure;
 
     report "MEASURE min_tLOW=" & time'image(s_min_low) &
       " min_tHIGH=" & time'image(s_min_high) &
       " min_period=" & time'image(s_min_period) &
       " min_data_hold=" & time'image(s_min_data_hold) &
-      " repeated_start_low=" & time'image(s_rep_low)
+      " repeated_start_low=" & time'image(s_rep_low) &
+      " repeated_start_setup=" & time'image(s_rep_setup) &
+      " repeated_start_hold=" & time'image(s_rep_hold) &
+      " repeated_start_high=" & time'image(s_rep_high)
       severity note;
     report "lm_i2c_master self-check passed" severity note;
     stop;
