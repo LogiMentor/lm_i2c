@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: hygiene
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check repository hygiene
+        shell: pwsh
+        run: ./tools/check_repo_hygiene.ps1 -Mode Full
+
+  ghdl:
+    name: ghdl
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up GHDL
+        uses: ghdl/setup-ghdl@75eff367dadc0cd06454a118db0b458d44fdc3c3 # v1.5.1
+        with:
+          version: 6.0.0
+          backend: mcode
+
+      - name: Run regression and synthesis check
+        shell: pwsh
+        run: ./sim/run_ghdl.ps1

@@ -39,6 +39,7 @@ output_files/
 *.jou
 *.str
 *.o
+*.exe
 db/
 incremental_db/
 

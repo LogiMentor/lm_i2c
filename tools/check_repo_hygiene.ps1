@@ -34,7 +34,7 @@ try {
     '(^|/)(reference|private)(/|$)',
     '(^|/)ces_[^/]*$',
     '(^|/)(work-obj[^/]*\.cf|modelsim\.ini|transcript)$',
-    '\.(ghw|vcd|fst|wlf|vpd|fsdb|jou|log|tmp)$'
+    '\.(ghw|vcd|fst|wlf|vpd|fsdb|jou|log|tmp|exe|o)$'
   )
   $textExtensions = @(
     ".cfg", ".conf", ".ini", ".json", ".md", ".ps1", ".sh", ".tcl",
