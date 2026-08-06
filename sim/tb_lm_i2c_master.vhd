@@ -1065,7 +1065,7 @@ begin
       report "address NACK unexpectedly cleared controller ownership"
       severity failure;
     p_allow_stop;
-    p_launch(true, true, true, x"FF", '0', true);
+    p_launch(false, true, false, x"FF", '1', true);
     p_wait_response(x"00", '0', '0', '0', 5);
     p_wait_bus_free;
 
