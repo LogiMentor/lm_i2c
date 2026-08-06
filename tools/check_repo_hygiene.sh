@@ -111,8 +111,7 @@ check_restricted_line() {
   line_number=$3
 
   if [[ "$display_path" == *"tools/check_repo_hygiene.sh"* ||
-        "$display_path" == *"tools/check_repo_hygiene.ps1"* ||
-        "$line" == *"hygiene-pattern-definition"* ]]; then
+        "$display_path" == *"tools/check_repo_hygiene.ps1"* ]]; then
     return
   fi
   if [[ "$line" =~ $absolute_path_pattern ]]; then

@@ -49,7 +49,9 @@ jobs:
           bash tools/check_repo_hygiene.sh \
             --commit-message-file "$clean_message"
 
-          printf '%s\n' 'Generated'"-by: controlled check" >"$blocked_message"
+          printf '%s\n' \
+            'Co-authored-by: Somebody x@y.z hygiene'"-pattern-definition" \
+            >"$blocked_message"
           if bash tools/check_repo_hygiene.sh \
             --commit-message-file "$blocked_message"; then
             printf '%s\n' "Blocked commit message was unexpectedly accepted." >&2
@@ -136,7 +138,10 @@ jobs:
 
             [IO.File]::WriteAllText(
               $blockedMessage,
-              ("Generated" + "-by: controlled check`n"),
+              (
+                "Co-authored-by: Somebody x@y.z hygiene" +
+                "-pattern-definition`n"
+              ),
               $utf8NoBom
             )
             $blockedProcess = Start-Process `

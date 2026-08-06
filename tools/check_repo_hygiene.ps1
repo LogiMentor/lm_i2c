@@ -122,8 +122,7 @@ function Test-Text {
       $normalizedLocation.EndsWith(
         "tools/check_repo_hygiene.ps1",
         [StringComparison]::OrdinalIgnoreCase
-      ) -or
-      $line.Contains("hygiene-pattern-definition")
+      )
     ) {
       continue
     }
