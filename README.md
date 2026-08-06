@@ -20,7 +20,7 @@ repository.
 ## Highlights
 
 - IEEE-library-only RTL that analyzes and synthesizes as VHDL-93
-- one byte transferred by every accepted command
+- one-byte commands plus an ownership-checked STOP-only command
 - optional START or repeated START before the byte
 - optional STOP after the byte
 - ready/valid command and backpressured ready/valid response interfaces
@@ -66,10 +66,12 @@ Unsupported combinations fail an assertion.
 | --- | --- | --- |
 | `clk_i` | input | system clock |
 | `rst_n_i` | input | active-low synchronous reset |
+| `bus_assume_free_i` | input | permit reset-time HIGH+tBUF qualification |
 | `cmd_valid_i` | input | command fields are valid |
 | `cmd_ready_o` | output | command can be accepted |
 | `cmd_start_i` | input | prepend START or repeated START |
 | `cmd_stop_i` | input | append STOP |
+| `cmd_stop_only_i` | input | generate only STOP; ignore other command fields |
 | `cmd_read_i` | input | zero writes; one reads |
 | `cmd_data_i[7:0]` | input | byte transmitted by a write |
 | `cmd_nack_i` | input | bit transmitted after a read |
@@ -78,7 +80,7 @@ A command is accepted on a rising `clk_i` edge when `cmd_valid_i` and
 `cmd_ready_o` are both high. All command fields must remain stable for that
 edge.
 
-Every command transfers exactly one byte:
+With `cmd_stop_only_i = '0'`, every command transfers exactly one byte:
 
 - `cmd_read_i = '0'` writes `cmd_data_i`;
 - `cmd_read_i = '1'` reads one byte;
@@ -86,9 +88,15 @@ Every command transfers exactly one byte:
   `cmd_nack_i = '1'` transmits NACK;
 - `cmd_nack_i` is ignored by writes.
 
-Standalone START-only and STOP-only commands are not part of the interface.
-The caller builds address, register, payload, and read sequences from byte
-commands.
+With `cmd_stop_only_i = '1'`, the command generates only STOP and ignores
+`cmd_start_i`, `cmd_stop_i`, `cmd_read_i`, `cmd_data_i`, and `cmd_nack_i`.
+STOP-only is legal only while the core owns the bus. It produces a successful
+response when owned and a command-error response without bus activity when
+unowned. It is useful after an address or data NACK because it releases the
+bus without transmitting another byte or nine additional clock slots.
+
+Standalone START-only commands are not part of the interface. The caller
+builds address, register, payload, and read sequences from byte commands.
 
 ### Response and status
 
@@ -109,6 +117,10 @@ Every accepted command produces exactly one response unless reset cancels it.
 `cmd_ready_o` remains low while that response is pending. Consuming a response
 and accepting a new command on the same edge is not supported; the next
 command can be accepted on the following edge.
+
+`busy_o` describes command execution and waiting only. It can be low while a
+response is pending; `cmd_ready_o` is the authoritative indication that
+another command can be accepted.
 
 `rsp_data_o` is meaningful for a successful read. `rsp_nack_o` is meaningful
 for a completed write. Arbitration loss and command error are terminal for the
@@ -142,9 +154,23 @@ buffer guidance.
 Local ownership and physical bus state are intentionally separate.
 
 After reset, the core releases SCL and SDA, clears local ownership and any
-pending response, and reports the bus busy or unqualified. It reports a known
-free bus only after synchronized SCL and SDA have both remained continuously
-high for at least the mode-specific tBUF interval.
+pending response, and keeps `bus_busy_o = '1'`. A continuously HIGH bus is not
+by itself proof that another controller is idle: it may be a logic-one HIGH
+phase in an active transfer.
+
+The core qualifies the bus free after tBUF only when either:
+
+- it observes a real STOP on synchronized SCL and SDA; or
+- `bus_assume_free_i = '1'` and synchronized SCL and SDA remain continuously
+  HIGH for the complete mode-specific tBUF interval.
+
+Tie `bus_assume_free_i` low when reset may occur during another controller's
+transfer. In that mode the core waits indefinitely for an observed STOP. Tie
+it high only when system integration guarantees reset is released onto an
+idle, released bus. This assumption cannot protect against resetting the core
+in the middle of a foreign transfer whose current SCL and SDA levels are both
+HIGH. Assertion while either line is LOW never qualifies the bus, and reset
+always clears an earlier qualification.
 
 For an accepted command with `cmd_start_i = '1'`:
 
@@ -192,11 +218,11 @@ The caller transmits a 7-bit address as `address[6:0] & direction`. Address
 
 Write `0xA5` to register `0x12` at address `0x50`:
 
-| Command | START | STOP | READ | DATA |
-| --- | ---: | ---: | ---: | --- |
-| Address + write direction | 1 | 0 | 0 | `0xA0` |
-| Register index | 0 | 0 | 0 | `0x12` |
-| Payload | 0 | 1 | 0 | `0xA5` |
+| Command | START | STOP | STOP_ONLY | READ | DATA |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Address + write direction | 1 | 0 | 0 | 0 | `0xA0` |
+| Register index | 0 | 0 | 0 | 0 | `0x12` |
+| Payload | 0 | 1 | 0 | 0 | `0xA5` |
 
 Require `rsp_nack_o = '0'` on each write response.
 
@@ -204,15 +230,21 @@ Require `rsp_nack_o = '0'` on each write response.
 
 Read register `0x12` from address `0x50`:
 
-| Command | START | STOP | READ | NACK | DATA |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Address + write direction | 1 | 0 | 0 | ignored | `0xA0` |
-| Register index | 0 | 0 | 0 | ignored | `0x12` |
-| Repeated START + read direction | 1 | 0 | 0 | ignored | `0xA1` |
-| Read final byte | 0 | 1 | 1 | 1 | ignored |
+| Command | START | STOP | STOP_ONLY | READ | NACK | DATA |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Address + write direction | 1 | 0 | 0 | 0 | ignored | `0xA0` |
+| Register index | 0 | 0 | 0 | 0 | ignored | `0x12` |
+| Repeated START + read direction | 1 | 0 | 0 | 0 | ignored | `0xA1` |
+| Read final byte | 0 | 1 | 0 | 1 | 1 | ignored |
 
 For a multi-byte read, use `cmd_nack_i = '0'` to ACK every byte except the
 last, then use `cmd_nack_i = '1'` to NACK the final byte.
+
+### NACK recovery
+
+If an address or data write returns `rsp_nack_o = '1'` without an appended
+STOP, submit a command with `cmd_stop_only_i = '1'`. The response confirms
+that STOP completed. No dummy data byte is placed on the bus.
 
 ## Timing and achieved frequency
 
@@ -229,22 +261,32 @@ low_cycles    = max(ceil(g_clk_freq_hz * tLOW),
                     hold_cycles + ceil(g_clk_freq_hz * tSU;DAT))
 high_cycles   = max(ceil(g_clk_freq_hz * tHIGH),
                     period_cycles - low_cycles)
+repeat_total  = max(high_cycles,
+                    ceil(g_clk_freq_hz * tSU;STA) +
+                    ceil(g_clk_freq_hz * tHD;STA))
 ```
 
 The controller does not change the next SDA value until the deliberate hold
 interval has elapsed after pulling SCL low. The remainder of tLOW preserves
 the required data setup before SCL is released.
 
+Repeated START reserves the mode-minimum hold interval and assigns the
+remaining `repeat_total` cycles to setup. Consequently its setup and hold
+minima are preserved while its complete HIGH side is never shorter than a
+normal requested-frequency HIGH interval.
+
 With no target stretching, the resolved SCL period is approximately:
 
 ```text
-(low_cycles + high_cycles + 2) / g_clk_freq_hz
+(low_cycles + high_cycles + 3) / g_clk_freq_hz
 ```
 
-The extra two `clk_i` cycles are the SCL input synchronizer latency before the
-HIGH timer starts. Ceiling division and synchronization can only reduce the
-achieved SCL frequency below the requested value. Clock stretching reduces it
-further.
+The additional cycles cover SCL release, the two input synchronizer stages,
+and FSM observation before the HIGH timer runs. An asynchronous target release
+can add up to one more `clk_i` cycle depending on its phase relative to the
+system clock. This is a conservative timing model, not an exact-cycle promise.
+Ceiling division and synchronization keep the achieved SCL frequency at or
+below the requested value. Clock stretching reduces it further.
 
 ## Verification
 
@@ -263,8 +305,8 @@ bash sim/run_ghdl.sh
 Both runners:
 
 - analyze and synthesize the RTL as VHDL-93;
-- run 10 MHz/100 kHz, 12 MHz/100 kHz, 10 MHz/400 kHz, and
-  50 MHz/400 kHz configurations;
+- run 10 MHz with 50, 100, 137, 200, 333, and 400 kHz requests, plus
+  12 MHz/100 kHz and 50 MHz/400 kHz;
 - run reset injection through every major bus phase;
 - verify unsupported generic failures for their intended assertions;
 - require the unique `lm_i2c_master self-check passed` marker;
@@ -275,7 +317,8 @@ The main testbench uses a passive monitor that observes only resolved SCL and
 SDA. It checks tLOW, tHIGH, requested frequency, START/repeated-START/STOP
 timing, tBUF, data setup, the deliberate data hold, stable SDA while SCL is
 high, and expected START/STOP counts. The target and competing-controller
-models exercise indefinite stretching, response backpressure, physical
+models exercise late legal ACK/read-data changes, repeated-START and STOP-only
+stretching, response backpressure, reset-time bus qualification, physical
 bus-busy protection, and arbitration-loss behavior.
 
 Repository policy checks are also available in both shells:
