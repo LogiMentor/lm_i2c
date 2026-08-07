@@ -127,14 +127,25 @@ try {
   Push-Location $workRoot
   $locationPushed = $true
 
-  $rtl = Join-Path $repoRoot "src/lm_i2c_master.vhd"
-  $tb = Join-Path $PSScriptRoot "tb_lm_i2c_master.vhd"
-  $resetTb = Join-Path $PSScriptRoot "tb_lm_i2c_master_reset.vhd"
-  $invalidTb = Join-Path $PSScriptRoot "tb_lm_i2c_master_invalid.vhd"
-  $mainMarker = "lm_i2c_master self-check passed"
+  $masterRtl = Join-Path $repoRoot "src/lm_i2c_master.vhd"
+  $targetRtl = Join-Path $repoRoot "src/lm_i2c_target.vhd"
+  $masterTb = Join-Path $PSScriptRoot "tb_lm_i2c_master.vhd"
+  $masterResetTb = Join-Path $PSScriptRoot "tb_lm_i2c_master_reset.vhd"
+  $masterInvalidTb = Join-Path $PSScriptRoot "tb_lm_i2c_master_invalid.vhd"
+  $targetTb = Join-Path $PSScriptRoot "tb_lm_i2c_target.vhd"
+  $targetResetTb = Join-Path $PSScriptRoot "tb_lm_i2c_target_reset.vhd"
+  $targetInvalidTb = Join-Path $PSScriptRoot "tb_lm_i2c_target_invalid.vhd"
+  $masterMarker = "lm_i2c_master self-check passed"
+  $targetMarker = "lm_i2c_target functional self-check passed"
 
-  Invoke-Ghdl @("-a", "--std=93", "--workdir=$rtlWork", $rtl)
-  $synthesisResult = Invoke-GhdlCapture -Arguments @(
+  Invoke-Ghdl @(
+    "-a",
+    "--std=93",
+    "--workdir=$rtlWork",
+    $masterRtl,
+    $targetRtl
+  )
+  $masterSynthesisResult = Invoke-GhdlCapture -Arguments @(
     "--synth",
     "--std=93",
     "--workdir=$rtlWork",
@@ -143,23 +154,45 @@ try {
     "lm_i2c_master"
   )
   [IO.File]::WriteAllText(
-    (Join-Path $workRoot "synthesis.txt"),
-    ($synthesisResult.Output | Out-String),
+    (Join-Path $workRoot "master-synthesis.txt"),
+    ($masterSynthesisResult.Output | Out-String),
     $utf8NoBom
   )
-  if ($synthesisResult.ExitCode -ne 0) {
-    $synthesisResult.Output | ForEach-Object { Write-Host $_ }
-    exit $synthesisResult.ExitCode
+  if ($masterSynthesisResult.ExitCode -ne 0) {
+    $masterSynthesisResult.Output | ForEach-Object { Write-Host $_ }
+    exit $masterSynthesisResult.ExitCode
+  }
+
+  $targetSynthesisResult = Invoke-GhdlCapture -Arguments @(
+    "--synth",
+    "--std=93",
+    "--workdir=$rtlWork",
+    "-gg_clk_freq_hz=50000000",
+    "-gg_i2c_freq_hz=400000",
+    "lm_i2c_target"
+  )
+  [IO.File]::WriteAllText(
+    (Join-Path $workRoot "target-synthesis.txt"),
+    ($targetSynthesisResult.Output | Out-String),
+    $utf8NoBom
+  )
+  if ($targetSynthesisResult.ExitCode -ne 0) {
+    $targetSynthesisResult.Output | ForEach-Object { Write-Host $_ }
+    exit $targetSynthesisResult.ExitCode
   }
 
   Invoke-Ghdl @(
     "-a",
     "--std=08",
     "--workdir=$simWork",
-    $rtl,
-    $tb,
-    $resetTb,
-    $invalidTb
+    $masterRtl,
+    $targetRtl,
+    $masterTb,
+    $masterResetTb,
+    $masterInvalidTb,
+    $targetTb,
+    $targetResetTb,
+    $targetInvalidTb
   )
   Invoke-Ghdl @("-e", "--std=08", "--workdir=$simWork", "tb_lm_i2c_master")
   Invoke-Ghdl @(
@@ -173,6 +206,19 @@ try {
     "--std=08",
     "--workdir=$simWork",
     "tb_lm_i2c_master_invalid"
+  )
+  Invoke-Ghdl @("-e", "--std=08", "--workdir=$simWork", "tb_lm_i2c_target")
+  Invoke-Ghdl @(
+    "-e",
+    "--std=08",
+    "--workdir=$simWork",
+    "tb_lm_i2c_target_reset"
+  )
+  Invoke-Ghdl @(
+    "-e",
+    "--std=08",
+    "--workdir=$simWork",
+    "tb_lm_i2c_target_invalid"
   )
 
   $testCases = @(
@@ -194,7 +240,7 @@ try {
         $testCase.Bus
     )
     Invoke-GhdlWithMarker `
-      -Marker $mainMarker `
+      -Marker $masterMarker `
       -OutputFile (Join-Path $workRoot "main-$index.txt") `
       -Arguments @(
         "-r",
@@ -219,6 +265,55 @@ try {
         "--std=08",
         "--workdir=$simWork",
         "tb_lm_i2c_master_reset",
+        "-gg_reset_case=$resetCase",
+        "--assert-level=error",
+        "--stop-time=$StopTime"
+      )
+  }
+
+  $targetTestCases = @(
+    @{ Clock = 10000000; Maximum = 100000; Actual = 100000 },
+    @{ Clock = 10000000; Maximum = 400000; Actual = 400000 },
+    @{ Clock = 800000; Maximum = 100000; Actual = 100000 },
+    @{ Clock = 3200000; Maximum = 400000; Actual = 400000 },
+    @{ Clock = 10000000; Maximum = 400000; Actual = 50000 }
+  )
+
+  for ($index = 0; $index -lt $targetTestCases.Count; $index++) {
+    $testCase = $targetTestCases[$index]
+    Write-Host (
+      "Running target clk={0} Hz, maximum={1} Hz, actual={2} Hz" -f
+        $testCase.Clock,
+        $testCase.Maximum,
+        $testCase.Actual
+    )
+    Invoke-GhdlWithMarker `
+      -Marker $targetMarker `
+      -OutputFile (Join-Path $workRoot "target-main-$index.txt") `
+      -Arguments @(
+        "-r",
+        "--std=08",
+        "--workdir=$simWork",
+        "tb_lm_i2c_target",
+        "-gg_clk_freq_hz=$($testCase.Clock)",
+        "-gg_i2c_freq_hz=$($testCase.Maximum)",
+        "-gg_actual_i2c_freq_hz=$($testCase.Actual)",
+        "--assert-level=error",
+        "--stop-time=$StopTime"
+      )
+  }
+
+  foreach ($resetCase in 0..7) {
+    $resetMarker = "lm_i2c_target reset case passed: $resetCase"
+    Write-Host "Running target reset case $resetCase"
+    Invoke-GhdlWithMarker `
+      -Marker $resetMarker `
+      -OutputFile (Join-Path $workRoot "target-reset-$resetCase.txt") `
+      -Arguments @(
+        "-r",
+        "--std=08",
+        "--workdir=$simWork",
+        "tb_lm_i2c_target_reset",
         "-gg_reset_case=$resetCase",
         "--assert-level=error",
         "--stop-time=$StopTime"
@@ -251,9 +346,48 @@ try {
       "--assert-level=error"
     )
 
+  Invoke-GhdlExpectedFailure `
+    -Expected "g_i2c_freq_hz must not exceed 400 kHz" `
+    -OutputFile (Join-Path $workRoot "target-invalid-frequency.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=10000000",
+      "-gg_i2c_freq_hz=400001",
+      "--assert-level=error"
+    )
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "g_clk_freq_hz must be at least eight times g_i2c_freq_hz" `
+    -OutputFile (Join-Path $workRoot "target-invalid-ratio.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=700000",
+      "-gg_i2c_freq_hz=100000",
+      "--assert-level=error"
+    )
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "system clock is too slow for synchronized SCL LOW takeover" `
+    -OutputFile (Join-Path $workRoot "target-invalid-takeover.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=1096000",
+      "-gg_i2c_freq_hz=137000",
+      "--assert-level=error"
+    )
+
   Write-Host (
-    "All I2C master regressions and the " +
-      "VHDL-93 synthesis check passed."
+    "All I2C controller and target regressions, VHDL-93 analysis, " +
+      "and synthesis checks passed."
   )
 }
 finally {
