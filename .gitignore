@@ -1,0 +1,77 @@
+# GHDL and simulator work
+work-obj*.cf
+sim/work/
+sim/work-*/
+work/
+modelsim.ini
+transcript
+
+# Waveforms and simulation databases
+*.ghw
+*.vcd
+*.fst
+*.wlf
+*.vpd
+*.fsdb
+*.trn
+*.shm/
+
+# Coverage
+coverage/
+covhtmlreport/
+*.gcda
+*.gcno
+*.lcov
+
+# Synthesis and implementation outputs
+build/
+dist/
+out/
+_build/
+synth/
+.Xil/
+*.cache/
+*.gen/
+*.hw/
+*.ip_user_files/
+*.runs/
+output_files/
+*.jou
+*.str
+*.o
+*.exe
+db/
+incremental_db/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.venv/
+venv/
+env/
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+~$*
+*.bak
+*.orig
+*.rej
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.temp
+tmp/
+temp/

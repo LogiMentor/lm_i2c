@@ -1,0 +1,356 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene-ubuntu:
+    name: Repository hygiene (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Bash content hygiene
+        shell: bash
+        run: bash tools/check_repo_hygiene.sh --full
+
+      - name: Run Bash tracked-path hygiene
+        shell: bash
+        run: bash tools/check_repo_hygiene.sh --tracked-paths
+
+      - name: Run Bash history hygiene
+        shell: bash
+        run: bash tools/check_repo_hygiene.sh --history --revision-range HEAD
+
+      - name: Test Bash commit-message policy
+        shell: bash
+        run: |
+          clean_message=$(mktemp "$RUNNER_TEMP/lm_i2c-clean.XXXXXX")
+          blocked_message=$(mktemp "$RUNNER_TEMP/lm_i2c-blocked.XXXXXX")
+          newline_name="hygiene missing newline.txt"
+          newline_file="$GITHUB_WORKSPACE/$newline_name"
+          history_repo=$(mktemp -d "$RUNNER_TEMP/lm_i2c-history.XXXXXX")
+          cleanup() {
+            git reset --quiet HEAD -- "$newline_name" >/dev/null 2>&1 || true
+            rm -f -- "$clean_message" "$blocked_message"
+            rm -f -- "$newline_file"
+            rm -rf -- "$history_repo"
+          }
+          trap cleanup EXIT
+
+          printf '%s\n' "ci: validate repository hygiene" >"$clean_message"
+          bash tools/check_repo_hygiene.sh \
+            --commit-message-file "$clean_message"
+
+          printf '%s\n' \
+            'Co-authored-by: Somebody x@y.z hygiene'"-pattern-definition" \
+            >"$blocked_message"
+          if bash tools/check_repo_hygiene.sh \
+            --commit-message-file "$blocked_message"; then
+            printf '%s\n' "Blocked commit message was unexpectedly accepted." >&2
+            exit 1
+          fi
+
+          printf '%s' "valid content" >"$newline_file"
+          if bash tools/check_repo_hygiene.sh --full; then
+            printf '%s\n' \
+              "Full mode accepted a file without a final newline." >&2
+            exit 1
+          fi
+
+          git add -- "$newline_name"
+          if bash tools/check_repo_hygiene.sh --staged; then
+            printf '%s\n' \
+              "Staged mode accepted a file without a final newline." >&2
+            exit 1
+          fi
+          bash tools/check_repo_hygiene.sh --tracked-paths
+          git reset --quiet HEAD -- "$newline_name"
+          rm -f -- "$newline_file"
+
+          mkdir -p -- "$history_repo/tools"
+          cp -- tools/check_repo_hygiene.sh \
+            "$history_repo/tools/check_repo_hygiene.sh"
+          git -C "$history_repo" init --quiet
+          git -C "$history_repo" config user.name "Hygiene Test"
+          git -C "$history_repo" config \
+            user.email "hygiene@example.invalid"
+          printf '%s' "valid content" \
+            >"$history_repo/missing newline.txt"
+          git -C "$history_repo" add -- \
+            tools/check_repo_hygiene.sh "missing newline.txt"
+          git -C "$history_repo" commit --quiet \
+            -m "test: missing newline"
+          if bash "$history_repo/tools/check_repo_hygiene.sh" \
+            --history --revision-range HEAD; then
+            printf '%s\n' \
+              "History mode accepted a blob without a final newline." >&2
+            exit 1
+          fi
+
+  regression-ubuntu:
+    name: VHDL regression (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up GHDL
+        uses: ghdl/setup-ghdl@75eff367dadc0cd06454a118db0b458d44fdc3c3 # v1.5.1
+        with:
+          version: 6.0.0
+          backend: mcode
+
+      - name: Run Bash regression
+        shell: bash
+        run: bash sim/run_ghdl.sh
+
+  hygiene-windows:
+    name: Repository hygiene (Windows)
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run PowerShell content hygiene
+        run: ./tools/check_repo_hygiene.ps1 -Mode Full
+
+      - name: Run PowerShell tracked-path hygiene
+        run: ./tools/check_repo_hygiene.ps1 -Mode Tracked
+
+      - name: Run PowerShell history hygiene
+        run: |
+          ./tools/check_repo_hygiene.ps1 `
+            -Mode History `
+            -RevisionRange HEAD
+
+      - name: Test PowerShell commit-message policy
+        run: |
+          $cleanMessage = Join-Path $env:RUNNER_TEMP "lm_i2c-clean.txt"
+          $blockedMessage = Join-Path $env:RUNNER_TEMP "lm_i2c-blocked.txt"
+          $newlineName = "hygiene missing newline.txt"
+          $newlineFile = Join-Path $PWD $newlineName
+          $historyRepo = Join-Path (
+            $env:RUNNER_TEMP
+          ) ("lm_i2c-hygiene-history-" + [guid]::NewGuid().ToString("N"))
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $powerShellPath = (Get-Process -Id $PID).Path
+
+          try {
+            [IO.File]::WriteAllText(
+              $cleanMessage,
+              "ci: validate repository hygiene`n",
+              $utf8NoBom
+            )
+            $cleanProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                "./tools/check_repo_hygiene.ps1",
+                "-Mode",
+                "CommitMessage",
+                "-CommitMessageFile",
+                $cleanMessage
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            $cleanExitCode = $cleanProcess.ExitCode
+            if ($cleanExitCode -ne 0) {
+              throw "Clean commit message was rejected."
+            }
+
+            [IO.File]::WriteAllText(
+              $blockedMessage,
+              (
+                "Co-authored-by: Somebody x@y.z hygiene" +
+                "-pattern-definition`n"
+              ),
+              $utf8NoBom
+            )
+            $blockedProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                "./tools/check_repo_hygiene.ps1",
+                "-Mode",
+                "CommitMessage",
+                "-CommitMessageFile",
+                $blockedMessage
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            $blockedExitCode = $blockedProcess.ExitCode
+            if ($blockedExitCode -ne 1) {
+              throw "Blocked commit message did not return exit code 1."
+            }
+
+            [IO.File]::WriteAllBytes(
+              $newlineFile,
+              [Text.Encoding]::UTF8.GetBytes("valid content")
+            )
+            $fullProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                "./tools/check_repo_hygiene.ps1",
+                "-Mode",
+                "Full"
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            if ($fullProcess.ExitCode -ne 1) {
+              throw "Full mode did not reject a missing final newline."
+            }
+
+            & git add -- $newlineName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to stage the missing-newline fixture."
+            }
+            $stagedProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                "./tools/check_repo_hygiene.ps1",
+                "-Mode",
+                "Staged"
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            if ($stagedProcess.ExitCode -ne 1) {
+              throw "Staged mode did not reject a missing final newline."
+            }
+
+            $trackedProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                "./tools/check_repo_hygiene.ps1",
+                "-Mode",
+                "Tracked"
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            if ($trackedProcess.ExitCode -ne 0) {
+              throw "Tracked path checking failed for the valid fixture path."
+            }
+            & git restore --staged -- $newlineName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to unstage the missing-newline fixture."
+            }
+            Remove-Item -LiteralPath $newlineFile -Force
+
+            New-Item -ItemType Directory `
+              -Path (Join-Path $historyRepo "tools") `
+              -Force | Out-Null
+            $historyChecker = Join-Path (
+              $historyRepo
+            ) "tools/check_repo_hygiene.ps1"
+            Copy-Item `
+              -LiteralPath "./tools/check_repo_hygiene.ps1" `
+              -Destination $historyChecker
+            & git -C $historyRepo init --quiet
+            & git -C $historyRepo config user.name "Hygiene Test"
+            & git -C $historyRepo config `
+              user.email "hygiene@example.invalid"
+            $historyFixture = Join-Path (
+              $historyRepo
+            ) "missing newline.txt"
+            [IO.File]::WriteAllBytes(
+              $historyFixture,
+              [Text.Encoding]::UTF8.GetBytes("valid content")
+            )
+            & git -C $historyRepo add -- `
+              "tools/check_repo_hygiene.ps1" `
+              "missing newline.txt"
+            & git -C $historyRepo commit --quiet `
+              -m "test: missing newline"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Unable to create the isolated history fixture."
+            }
+            $historyProcess = Start-Process `
+              -FilePath $powerShellPath `
+              -ArgumentList @(
+                "-NoLogo",
+                "-NoProfile",
+                "-File",
+                $historyChecker,
+                "-Mode",
+                "History",
+                "-RevisionRange",
+                "HEAD"
+              ) `
+              -NoNewWindow `
+              -Wait `
+              -PassThru
+            if ($historyProcess.ExitCode -ne 1) {
+              throw "History mode did not reject a missing final newline."
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $cleanMessage, $blockedMessage `
+              -Force -ErrorAction SilentlyContinue
+            & git reset --quiet HEAD -- $newlineName 2>$null
+            Remove-Item -LiteralPath $newlineFile `
+              -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $historyRepo `
+              -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+  regression-windows:
+    name: VHDL regression (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up GHDL
+        uses: ghdl/setup-ghdl@75eff367dadc0cd06454a118db0b458d44fdc3c3 # v1.5.1
+        with:
+          version: 6.0.0
+          backend: mcode
+
+      - name: Run native PowerShell regression
+        run: ./sim/run_ghdl.ps1

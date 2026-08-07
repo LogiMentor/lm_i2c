@@ -1,0 +1,28 @@
+* text=auto
+
+*.vhd text eol=lf
+*.vhdl text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+
+.editorconfig text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf
+LICENSE text eol=lf
+NOTICE text eol=lf
+
+*.ghw binary
+*.vcd binary
+*.fst binary
+*.wlf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.gz binary
