@@ -48,6 +48,98 @@ function Invoke-Git {
   return $output
 }
 
+function ConvertTo-ProcessArgument {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Value
+  )
+
+  if ($Value.Length -ne 0 -and $Value -notmatch '[\s"]') {
+    return $Value
+  }
+
+  $quoted = New-Object Text.StringBuilder
+  [void]$quoted.Append('"')
+  $backslashes = 0
+  for ($index = 0; $index -lt $Value.Length; $index++) {
+    $character = $Value[$index]
+    if ($character -eq '\') {
+      $backslashes++
+    }
+    elseif ($character -eq '"') {
+      [void]$quoted.Append("\" * (2 * $backslashes + 1))
+      [void]$quoted.Append('"')
+      $backslashes = 0
+    }
+    else {
+      [void]$quoted.Append("\" * $backslashes)
+      [void]$quoted.Append($character)
+      $backslashes = 0
+    }
+  }
+  [void]$quoted.Append("\" * (2 * $backslashes))
+  [void]$quoted.Append('"')
+  return $quoted.ToString()
+}
+
+function Get-GitObjectBytes {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ObjectSpec
+  )
+
+  $gitCommand = Get-Command git -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1
+  $arguments = @("-C", $repoRoot, "show", "--no-textconv", $ObjectSpec)
+  $startInfo = New-Object Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $gitCommand.Source
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+
+  if ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {
+    foreach ($argument in $arguments) {
+      [void]$startInfo.ArgumentList.Add($argument)
+    }
+  }
+  else {
+    $startInfo.Arguments = (
+      $arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }
+    ) -join " "
+  }
+
+  $process = New-Object Diagnostics.Process
+  $memory = New-Object IO.MemoryStream
+  try {
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) {
+      throw "Unable to start Git while reading object '$ObjectSpec'."
+    }
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $process.StandardOutput.BaseStream.CopyTo($memory)
+    $process.WaitForExit()
+    $stderr = $stderrTask.GetAwaiter().GetResult().Trim()
+    if ($process.ExitCode -ne 0) {
+      if (-not $stderr) {
+        $stderr = "no error output"
+      }
+      throw (
+        "Git failed with exit code $($process.ExitCode) while reading " +
+        "object '$ObjectSpec': $stderr"
+      )
+    }
+    [pscustomobject]@{
+      Bytes = [byte[]]$memory.ToArray()
+    }
+  }
+  finally {
+    $memory.Dispose()
+    $process.Dispose()
+  }
+}
+
 function Test-TextPath {
   param(
     [Parameter(Mandatory = $true)]
@@ -147,6 +239,37 @@ function Test-Text {
   }
 }
 
+function Test-TextBytes {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [byte[]]$Bytes,
+    [Parameter(Mandatory = $true)]
+    [string]$Location,
+    [bool]$CheckFinalNewline = $true
+  )
+
+  if ([Array]::IndexOf($Bytes, [byte]0) -ge 0) {
+    Add-Failure $Location "text contains a NUL byte"
+    return
+  }
+
+  try {
+    $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $text = $strictUtf8.GetString($Bytes)
+  }
+  catch {
+    Add-Failure $Location "unable to read valid UTF-8 text"
+    return
+  }
+
+  if ($CheckFinalNewline -and $Bytes.Length -gt 0 -and
+      $Bytes[$Bytes.Length - 1] -ne [byte]10) {
+    Add-Failure $Location "missing final newline"
+  }
+  Test-Text $text $Location $false
+}
+
 function Test-WorkingFile {
   param(
     [Parameter(Mandatory = $true)]
@@ -161,17 +284,12 @@ function Test-WorkingFile {
   $fullPath = Join-Path $repoRoot $Path
   try {
     $bytes = [IO.File]::ReadAllBytes($fullPath)
-    $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
-    $text = $strictUtf8.GetString($bytes)
-    if ([Array]::IndexOf($bytes, [byte]0) -ge 0) {
-      Add-Failure $Path "text contains a NUL byte"
-      return
-    }
-    Test-Text $text $Path
   }
   catch {
-    Add-Failure $Path "unable to read valid UTF-8 text"
+    Add-Failure $Path "unable to read file bytes"
+    return
   }
+  Test-TextBytes $bytes $Path
 }
 
 function Test-GitFile {
@@ -194,13 +312,8 @@ function Test-GitFile {
   else {
     $objectSpec = "${Revision}:$Path"
   }
-  $text = (Invoke-Git @(
-    "show", "--no-textconv", $objectSpec
-  )) -join "`n"
-  if ($text.Length -gt 0) {
-    $text += "`n"
-  }
-  Test-Text $text $Location
+  $blob = Get-GitObjectBytes $objectSpec
+  Test-TextBytes $blob.Bytes $Location
 }
 
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
