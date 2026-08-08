@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
   [string]$Ghdl = "ghdl",
-  [string]$StopTime = "20ms"
+  [string]$StopTime = "100ms"
 )
 
 $ErrorActionPreference = "Stop"
@@ -272,11 +272,20 @@ try {
   }
 
   $targetTestCases = @(
+    @{ Clock = 10000000; Maximum = 50000; Actual = 50000 },
     @{ Clock = 10000000; Maximum = 100000; Actual = 100000 },
+    @{ Clock = 10000000; Maximum = 137000; Actual = 137000 },
+    @{ Clock = 10000000; Maximum = 200000; Actual = 200000 },
+    @{ Clock = 10000000; Maximum = 333000; Actual = 333000 },
     @{ Clock = 10000000; Maximum = 400000; Actual = 400000 },
-    @{ Clock = 800000; Maximum = 100000; Actual = 100000 },
+    @{ Clock = 25000000; Maximum = 400000; Actual = 400000 },
+    @{ Clock = 50000000; Maximum = 400000; Actual = 400000 },
+    @{ Clock = 851064; Maximum = 100000; Actual = 100000 },
+    @{ Clock = 3076924; Maximum = 333000; Actual = 333000 },
     @{ Clock = 3200000; Maximum = 400000; Actual = 400000 },
-    @{ Clock = 10000000; Maximum = 400000; Actual = 50000 }
+    @{ Clock = 10000000; Maximum = 400000; Actual = 50000 },
+    @{ Clock = 10000000; Maximum = 400000; Actual = 10000 },
+    @{ Clock = 10000000; Maximum = 100000; Actual = 25000 }
   )
 
   for ($index = 0; $index -lt $targetTestCases.Count; $index++) {
@@ -373,15 +382,28 @@ try {
     )
 
   Invoke-GhdlExpectedFailure `
-    -Expected "system clock is too slow for synchronized SCL LOW takeover" `
-    -OutputFile (Join-Path $workRoot "target-invalid-takeover.txt") `
+    -Expected "system clock is too slow for synchronized target SCL takeover" `
+    -OutputFile (Join-Path $workRoot "target-invalid-standard-takeover.txt") `
     -Arguments @(
       "-r",
       "--std=08",
       "--workdir=$simWork",
       "tb_lm_i2c_target_invalid",
-      "-gg_clk_freq_hz=1096000",
-      "-gg_i2c_freq_hz=137000",
+      "-gg_clk_freq_hz=851063",
+      "-gg_i2c_freq_hz=100000",
+      "--assert-level=error"
+    )
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "system clock is too slow for synchronized target SCL takeover" `
+    -OutputFile (Join-Path $workRoot "target-invalid-fast-takeover.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=3076923",
+      "-gg_i2c_freq_hz=333000",
       "--assert-level=error"
     )
 

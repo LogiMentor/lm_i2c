@@ -69,12 +69,13 @@ architecture a_tb of tb_lm_i2c_target is
   constant C_T_SU_STO : time :=
     f_mode_time(4.0 us, 0.6 us, g_actual_i2c_freq_hz);
   constant C_T_SU_DAT : time :=
-    f_mode_time(250 ns, 100 ns, g_i2c_freq_hz);
+    f_mode_time(250 ns, 100 ns, g_actual_i2c_freq_hz);
   constant C_T_HD_DAT : time := 300 ns;
+  constant C_T_STRETCH_SETUP : time := 1250 ns;
   constant C_BUS_PERIOD : time := 1 sec / g_actual_i2c_freq_hz;
   constant C_CTRL_HIGH : time :=
     f_max_time(C_T_HIGH, C_BUS_PERIOD - C_T_LOW);
-  constant C_WATCHDOG : time := 20 ms;
+  constant C_WATCHDOG : time := 100 ms;
   constant C_TARGET_ADDRESS : std_logic_vector(6 downto 0) := "1010010";
   constant C_READ_ADDRESS : std_logic_vector(7 downto 0) := x"A5";
 
@@ -130,6 +131,9 @@ architecture a_tb of tb_lm_i2c_target is
   signal s_addressed_count : natural := 0;
   signal s_stop_count      : natural := 0;
   signal s_rx_count        : natural := 0;
+  signal s_last_rx_data    : std_logic_vector(7 downto 0) := (others => '0');
+  signal s_min_target_hold : time := 1 sec;
+  signal s_min_target_setup : time := 1 sec;
 
 begin
 
@@ -223,6 +227,7 @@ begin
         s_addressed_count <= 0;
         s_stop_count      <= 0;
         s_rx_count        <= 0;
+        s_last_rx_data    <= (others => '0');
         v_addressed_previous := '0';
         v_stop_previous      := '0';
       else
@@ -248,6 +253,7 @@ begin
         end if;
         if s_rx_valid = '1' and s_rx_ready = '1' then
           s_rx_count <= s_rx_count + 1;
+          s_last_rx_data <= s_rx_data;
         end if;
         v_addressed_previous := s_addressed;
         v_stop_previous      := s_stop;
@@ -284,6 +290,13 @@ begin
         assert now - v_last_sda_change >= C_T_SU_DAT
           report "target SDA setup before physical SCL rise was too short"
           severity failure;
+        assert now - v_last_sda_change >= C_T_STRETCH_SETUP
+          report "target stretch-release setup was below 1250 ns"
+          severity failure;
+        if now - v_last_sda_change < s_min_target_setup then
+          s_min_target_setup <= now - v_last_sda_change;
+        end if;
+        v_have_sda_change := false;
       end if;
 
       if s_target_sda_low'event then
@@ -293,6 +306,9 @@ begin
         assert v_have_fall and now - v_last_fall >= C_T_HD_DAT
           report "target SDA change violated the 300 ns data hold policy"
           severity failure;
+        if now - v_last_fall < s_min_target_hold then
+          s_min_target_hold <= now - v_last_fall;
+        end if;
         v_last_sda_change := now;
         v_have_sda_change := true;
       end if;
@@ -351,17 +367,37 @@ begin
       wait for C_T_BUF;
     end procedure p_stop;
 
-    procedure p_controller_bit (
+    procedure p_drive_controller_sda (
       constant value : in std_logic
     ) is
     begin
-      wait for C_T_HD_DAT;
       if value = '0' then
         s_bfm_sda_low <= '1';
       else
         s_bfm_sda_low <= '0';
       end if;
-      wait for C_T_LOW - C_T_HD_DAT;
+    end procedure p_drive_controller_sda;
+
+    procedure p_controller_bit (
+      constant value     : in std_logic;
+      constant late_data : in boolean := false
+    ) is
+      constant C_HALF_PERIOD : time := C_CLK_PERIOD / 2;
+    begin
+      if late_data then
+        -- Extend LOW as needed, then place SDA at the last legal setup point.
+        wait for C_T_LOW;
+        wait until falling_edge(s_clk);
+        if C_HALF_PERIOD > C_T_SU_DAT + 2 fs then
+          wait for (C_HALF_PERIOD - C_T_SU_DAT) / 2;
+        end if;
+        p_drive_controller_sda(value);
+        wait for C_T_SU_DAT;
+      else
+        wait for C_T_HD_DAT;
+        p_drive_controller_sda(value);
+        wait for C_T_LOW - C_T_HD_DAT;
+      end if;
       s_bfm_scl_low <= '0';
       wait until s_scl = '1';
       wait for C_CTRL_HIGH;
@@ -371,11 +407,12 @@ begin
     procedure p_address_byte (
       constant value          : in std_logic_vector(7 downto 0);
       constant expected_ack   : in boolean;
-      constant expect_passive : in boolean := false
+      constant expect_passive : in boolean := false;
+      constant late_data      : in boolean := false
     ) is
     begin
       for v_bit in 7 downto 0 loop
-        p_controller_bit(value(v_bit));
+        p_controller_bit(value(v_bit), late_data);
         if expect_passive then
           assert s_target_scl_low = '0' and s_target_sda_low = '0'
             report "passive target drove or stretched the bus"
@@ -411,7 +448,8 @@ begin
     procedure p_write_byte (
       constant value               : in std_logic_vector(7 downto 0);
       constant application_nack    : in boolean;
-      constant backpressure_cycles : in natural
+      constant backpressure_cycles : in natural;
+      constant late_data           : in boolean := false
     ) is
       variable v_expected_rx_count : natural;
       variable v_stretch_start     : time;
@@ -421,7 +459,10 @@ begin
       v_expected_rx_count := s_rx_count;
 
       for v_bit in 7 downto 0 loop
-        p_controller_bit(value(v_bit));
+        p_controller_bit(value(v_bit), late_data);
+        assert s_active = '1' and s_read = '0'
+          report "target selection changed during controller write data"
+          severity failure;
       end loop;
 
       while s_rx_valid /= '1' loop
@@ -481,6 +522,62 @@ begin
         wait until s_rx_count = v_expected_rx_count + 1;
       end if;
     end procedure p_write_byte;
+
+    procedure p_write_byte_ready_early (
+      constant value            : in std_logic_vector(7 downto 0);
+      constant application_nack : in boolean;
+      constant late_data        : in boolean := false
+    ) is
+      variable v_rx_before : natural;
+    begin
+      v_rx_before := s_rx_count;
+      if application_nack then
+        s_rx_nack <= '1';
+      else
+        s_rx_nack <= '0';
+      end if;
+      s_rx_ready <= '1';
+
+      for v_bit in 7 downto 0 loop
+        p_controller_bit(value(v_bit), late_data);
+        assert s_active = '1' and s_read = '0'
+          report "early-ready write lost active target selection"
+          severity failure;
+      end loop;
+
+      while s_rx_count /= v_rx_before + 1 loop
+        wait until rising_edge(s_clk);
+      end loop;
+      s_rx_ready <= '0';
+      s_rx_nack  <= '0';
+      assert s_rx_count = v_rx_before + 1 and s_last_rx_data = value
+        report "early-ready RX handshake count or data was incorrect"
+        severity failure;
+
+      wait for C_T_HD_DAT;
+      s_bfm_sda_low <= '0';
+      wait for C_T_LOW - C_T_HD_DAT;
+      s_bfm_scl_low <= '0';
+      wait until s_scl = '1';
+      wait for C_CTRL_HIGH / 2;
+      if application_nack then
+        assert s_sda = '1'
+          report "early rx_ready_i NACK decision was ignored"
+          severity failure;
+      else
+        assert s_sda = '0'
+          report "early rx_ready_i ACK decision was ignored"
+          severity failure;
+      end if;
+      wait for C_CTRL_HIGH - C_CTRL_HIGH / 2;
+      s_bfm_scl_low <= '1';
+      wait for C_T_HD_DAT;
+      s_bfm_sda_low <= '0';
+      p_wait_clocks(2);
+      assert s_rx_count = v_rx_before + 1
+        report "early-ready byte produced more than one RX handshake"
+        severity failure;
+    end procedure p_write_byte_ready_early;
 
     procedure p_unaccepted_write_byte (
       constant value : in std_logic_vector(7 downto 0)
@@ -782,6 +879,18 @@ begin
       report "STOP did not end the selected write transaction"
       severity failure;
 
+    -- The RX decision may already be available when the eighth bit completes.
+    p_start(false);
+    p_address_byte(x"A4", true);
+    p_write_byte_ready_early(x"AA", false);
+    p_write_byte_ready_early(x"55", true);
+    v_rx_before := s_rx_count;
+    p_unaccepted_write_byte(x"5A");
+    assert s_rx_count = v_rx_before
+      report "early application NACK did not suppress later RX bytes"
+      severity failure;
+    p_stop;
+
     -- Read stream starvation, controller ACK continuation, and NACK stop.
     v_addressed_before := s_addressed_count;
     p_start(false);
@@ -841,6 +950,27 @@ begin
       severity failure;
     p_stop;
 
+    -- Worst-case legal controller data setup must not resemble START or STOP.
+    v_addressed_before := s_addressed_count;
+    v_stop_before := s_stop_count;
+    v_rx_before := s_rx_count;
+    p_start(false);
+    p_address_byte(x"A4", true, false, true);
+    p_write_byte(x"AA", false, 0, true);
+    p_write_byte(x"55", false, 6, true);
+    p_start(true);
+    p_address_byte(x"A4", true, false, true);
+    p_write_byte(x"A5", false, 0, true);
+    p_write_byte(x"5A", false, 6, true);
+    p_stop;
+    p_wait_clocks(4);
+    assert s_addressed_count = v_addressed_before + 2 and
+           s_stop_count = v_stop_before + 1 and
+           s_rx_count = v_rx_before + 4 and
+           s_last_rx_data = x"5A" and s_active = '0'
+      report "late legal data caused a false bus event or incorrect RX data"
+      severity failure;
+
     -- Real controller/target integration: write, then combined write/read.
     s_bfm_scl_low <= '0';
     s_bfm_sda_low <= '0';
@@ -894,6 +1024,18 @@ begin
       report "bus was not released after integration regression"
       severity failure;
 
+    assert s_min_target_hold >= C_T_HD_DAT and
+           s_min_target_hold < 1 sec
+      report "target data-hold measurement was not captured"
+      severity failure;
+    assert s_min_target_setup >= C_T_STRETCH_SETUP and
+           s_min_target_setup < 1 sec
+      report "target stretch-release setup measurement was not captured"
+      severity failure;
+
+    report "MEASURE target_min_hold=" & time'image(s_min_target_hold) &
+      " target_min_stretch_setup=" & time'image(s_min_target_setup)
+      severity note;
     report "lm_i2c_target functional self-check passed" severity note;
     stop;
     wait;

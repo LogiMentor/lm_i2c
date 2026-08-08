@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ghdl_bin=${GHDL:-ghdl}
-stop_time=20ms
+stop_time=100ms
 
 usage() {
   printf '%s\n' "Usage: run_ghdl.sh [--stop-time <GHDL time>]" >&2
@@ -156,11 +156,20 @@ done
 
 config_index=0
 for config in \
+  "10000000 50000 50000" \
   "10000000 100000 100000" \
+  "10000000 137000 137000" \
+  "10000000 200000 200000" \
+  "10000000 333000 333000" \
   "10000000 400000 400000" \
-  "800000 100000 100000" \
+  "25000000 400000 400000" \
+  "50000000 400000 400000" \
+  "851064 100000 100000" \
+  "3076924 333000 333000" \
   "3200000 400000 400000" \
-  "10000000 400000 50000"; do
+  "10000000 400000 50000" \
+  "10000000 400000 10000" \
+  "10000000 100000 25000"; do
   read -r clock_hz maximum_hz actual_hz <<<"$config"
   printf 'Running target clk=%s Hz, maximum=%s Hz, actual=%s Hz\n' \
     "$clock_hz" "$maximum_hz" "$actual_hz"
@@ -223,12 +232,21 @@ run_expected_failure \
   --assert-level=error
 
 run_expected_failure \
-  "system clock is too slow for synchronized SCL LOW takeover" \
-  "$work_root/target-invalid-takeover.txt" \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-invalid-standard-takeover.txt" \
   "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
   tb_lm_i2c_target_invalid \
-  -gg_clk_freq_hz=1096000 \
-  -gg_i2c_freq_hz=137000 \
+  -gg_clk_freq_hz=851063 \
+  -gg_i2c_freq_hz=100000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-invalid-fast-takeover.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=3076923 \
+  -gg_i2c_freq_hz=333000 \
   --assert-level=error
 
 printf '%s\n' \
