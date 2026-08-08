@@ -73,10 +73,13 @@ For `lm_i2c_master`, `g_i2c_freq_hz` is the requested maximum generated SCL
 frequency. For `lm_i2c_target`, it is the maximum expected external SCL
 frequency; a slower external controller is supported without reconfiguration.
 The target also asserts that the mode-specific minimum LOW time contains enough
-system-clock cycles for its synchronized stretch-takeover strategy. This
-derived check can reject a marginal intermediate-frequency combination even
-when its integer frequency ratio is exactly 8:1; increasing
-`g_clk_freq_hz` resolves it.
+system-clock cycles for its synchronized stretch-takeover strategy. In
+addition to the 8:1 ratio, the target requires at least five system-clock
+cycles in the published minimum LOW interval. The resulting absolute minima
+are 851,064 Hz when `g_i2c_freq_hz <= 100_000` and 3,076,924 Hz above 100 kHz.
+The effective lower bound is therefore the greater of the applicable absolute
+minimum and `8 * g_i2c_freq_hz`. For example, 400 kHz requires at least
+3.2 MHz because the ratio is the stronger constraint.
 
 ## Controller public interface
 
@@ -249,7 +252,10 @@ The target uses two synchronization flip-flops per resolved input and makes all
 START, STOP, SCL-edge, data, ACK/NACK, and stretching decisions from those
 synchronized values. Synchronizer latency is included in its LOW-phase
 takeover assertion and test coverage. No analog or digital spike filtering is
-claimed.
+claimed. A START or STOP is recognized only when both the previous and current
+synchronized SCL samples are HIGH. This stable-HIGH qualification prevents a
+legal late SDA update before an SCL rising edge from being mistaken for a bus
+event.
 
 The target pulls SCL low only after observing a physical falling edge and only
 while selected work requires more LOW time. It stretches for RX backpressure,
@@ -262,21 +268,27 @@ has actually risen.
 For address ACK, received-byte ACK/NACK, read-data bits, and release before the
 controller ACK/NACK bit, the target first takes over the LOW phase, preserves a
 conservative 300 ns from the physical SCL falling edge to its SDA change, then
-preserves mode-specific tSU;DAT before releasing SCL. It never actively drives
-either line high and never creates START or STOP.
+preserves at least 1.25 us before releasing SCL. This fixed release margin
+covers the Standard-mode 1.0 us maximum rise time plus its 250 ns data-setup
+minimum even when the actual controller is slower than a Fast-mode-configured
+maximum. It never actively drives either line high and never creates START or
+STOP.
 
 ### Target reset and abort behavior
 
 Reset is synchronous and active low. On its rising `clk_i` edge it releases
 SCL and SDA, clears selection and direction, clears the status pulses, discards
 pending RX data and an accepted but not yet transmitted TX byte, cancels both
-ready/valid handshakes, and clears all address and bit state. Reset immediately
-ends local stretching.
+ready/valid handshakes, and clears all address and bit state. On that edge the
+core deasserts its own SCL and SDA pull-low controls, ending local stretching;
+the resolved bus can still remain LOW if another device is pulling it LOW.
 
-Reset during a physical transfer does not generate STOP. The external
-controller can therefore observe a NACK or incomplete transfer. A new target
-transaction requires reset release followed by a fresh START; no stale RX or
-TX handshake is retained.
+Reset does not deliberately generate a STOP sequence. If reset occurs while
+the target is holding either line LOW, the physical release transitions depend
+on the external pull-ups and bus timing and must not be relied upon as a
+protocol STOP. The external controller can observe a NACK or incomplete
+transfer. A new target transaction requires reset release followed by a fresh
+START; no stale RX or TX handshake is retained.
 
 ## Ownership and bus-free behavior
 
@@ -508,8 +520,12 @@ Both runners:
 - analyze and synthesize both RTL entities as VHDL-93;
 - run 10 MHz with 50, 100, 137, 200, 333, and 400 kHz requests, plus
   12 MHz/100 kHz and 50 MHz/400 kHz for the controller;
-- run the target at Standard-mode, Fast-mode, both 8:1 endpoint ratios, and
-  with an actual 50 kHz controller below a configured 400 kHz maximum;
+- run the target at 10 MHz with configured/actual 50, 100, 137, 200, 333, and
+  400 kHz buses, plus 25 MHz/400 kHz and 50 MHz/400 kHz;
+- run the exact target takeover pass boundaries at 851,064 Hz/100 kHz and
+  3,076,924 Hz/333 kHz, plus the 3.2 MHz/400 kHz ratio boundary;
+- run slower actual buses at 50 kHz and 10 kHz under a configured 400 kHz
+  maximum, and at 25 kHz under a configured 100 kHz maximum;
 - run reset injection through every major controller and target bus phase;
 - verify unsupported generic failures for their intended assertions;
 - require unique functional and per-reset success markers for both entities;
@@ -530,9 +546,11 @@ streams. Its directed controller model additionally verifies disabled and
 mismatched address passivity, exact ACK slots, RX backpressure and application
 NACK, TX starvation and controller ACK/NACK, multi-byte transfers, repeated
 START direction changes and deselection, sampled configuration, slower SCL,
-and fresh transfers after reset. A passive monitor checks target SDA stability
-while SCL is HIGH, the literal 300 ns hold policy, mode-specific data setup,
-selected-only LOW extension, and open-drain release.
+early-ready application ACK/NACK decisions, late legal SDA updates at every
+target configuration, and fresh transfers after reset. A passive monitor
+checks target SDA stability while SCL is HIGH, the literal 300 ns hold policy,
+the fixed 1.25 us stretch-release setup policy, selected-only LOW extension,
+and open-drain release.
 
 Repository policy checks are also available in both shells:
 
