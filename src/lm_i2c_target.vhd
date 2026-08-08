@@ -27,32 +27,34 @@ entity lm_i2c_target is
     clk_i   : in std_logic;
     rst_n_i : in std_logic;
 
-    -- Synchronous or static configuration
+    -- Inputs: synchronous or static configuration
     enable_i  : in std_logic;
     address_i : in std_logic_vector(6 downto 0);
 
-    -- Transaction status
+    -- Inputs: controller-to-target stream
+    rx_ready_i : in  std_logic;
+    rx_nack_i  : in  std_logic;
+
+    -- Inputs: target-to-controller stream
+    tx_valid_i : in  std_logic;
+    tx_data_i  : in  std_logic_vector(7 downto 0);
+
+    -- Inputs: resolved I2C bus
+    scl_i : in std_logic;
+    sda_i : in std_logic;
+
+    -- Outputs: transaction status
     active_o    : out std_logic;
     read_o      : out std_logic;
     addressed_o : out std_logic;
     stop_o      : out std_logic;
 
-    -- Controller-to-target stream
+    -- Outputs: application streams
     rx_valid_o : out std_logic;
-    rx_ready_i : in  std_logic;
     rx_data_o  : out std_logic_vector(7 downto 0);
-    rx_nack_i  : in  std_logic;
-
-    -- Target-to-controller stream
-    tx_valid_i : in  std_logic;
     tx_ready_o : out std_logic;
-    tx_data_i  : in  std_logic_vector(7 downto 0);
 
-    -- Resolved I2C bus inputs
-    scl_i : in std_logic;
-    sda_i : in std_logic;
-
-    -- Active-high open-drain controls
+    -- Outputs: active-high open-drain controls
     scl_low_o : out std_logic;
     sda_low_o : out std_logic
   );
@@ -100,11 +102,8 @@ architecture a_rtl of lm_i2c_target is
 
   constant C_DATA_HOLD_CYCLES : positive :=
     f_scale_ceil(g_clk_freq_hz, 3, 10_000_000);
-  constant C_DATA_SETUP_CYCLES : positive := f_mode_cycles(
-    f_scale_ceil(g_clk_freq_hz, 1, 4_000_000),
-    f_scale_ceil(g_clk_freq_hz, 1, 10_000_000),
-    g_i2c_freq_hz
-  );
+  constant C_STRETCH_SETUP_CYCLES : positive :=
+    f_scale_ceil(g_clk_freq_hz, 5, 4_000_000);
   constant C_LOW_MIN_CYCLES : positive := f_mode_cycles(
     f_scale_ceil(g_clk_freq_hz, 47, 10_000_000),
     f_scale_ceil(g_clk_freq_hz, 13, 10_000_000),
@@ -112,7 +111,7 @@ architecture a_rtl of lm_i2c_target is
   );
   constant C_SYNC_TAKEOVER_CYCLES : positive := 3;
   constant C_TIMER_MAX : positive :=
-    f_max(C_DATA_HOLD_CYCLES, C_DATA_SETUP_CYCLES);
+    f_max(C_DATA_HOLD_CYCLES, C_STRETCH_SETUP_CYCLES);
 
   type t_state is (
     st_idle,
@@ -189,16 +188,16 @@ begin
     report "g_clk_freq_hz must be at least eight times g_i2c_freq_hz"
     severity failure;
 
-  assert C_LOW_MIN_CYCLES >= C_SYNC_TAKEOVER_CYCLES + 1
-    report "system clock is too slow for synchronized SCL LOW takeover"
+  assert C_LOW_MIN_CYCLES >= C_SYNC_TAKEOVER_CYCLES + 2
+    report "system clock is too slow for synchronized target SCL takeover"
     severity failure;
 
   assert C_DATA_HOLD_CYCLES > 0
     report "derived data-hold interval must be nonzero"
     severity failure;
 
-  assert C_DATA_SETUP_CYCLES > 0
-    report "derived data-setup interval must be nonzero"
+  assert C_STRETCH_SETUP_CYCLES > 0
+    report "derived stretch-release setup interval must be nonzero"
     severity failure;
 
   active_o  <= s_active;
@@ -263,6 +262,7 @@ begin
         stop_o      <= '0';
 
         if s_sync_ready = 3 and
+           s_scl_prev = '1' and
            s_scl_sync = '1' and
            s_sda_prev = '1' and s_sda_sync = '0' then
           s_state             <= st_address;
@@ -285,6 +285,7 @@ begin
           s_tx_ready          <= '0';
 
         elsif s_sync_ready = 3 and
+              s_scl_prev = '1' and
               s_scl_sync = '1' and
               s_sda_prev = '0' and s_sda_sync = '1' then
           s_state             <= st_idle;
@@ -357,7 +358,7 @@ begin
             when st_address_ack_hold =>
               if s_timer = 0 then
                 s_sda_low <= '1';
-                s_timer   <= C_DATA_SETUP_CYCLES - 1;
+                s_timer   <= C_STRETCH_SETUP_CYCLES - 1;
                 s_state   <= st_address_ack_setup;
               else
                 s_timer <= s_timer - 1;
@@ -392,7 +393,7 @@ begin
             when st_rx_start_hold =>
               if s_timer = 0 then
                 s_sda_low <= '0';
-                s_timer   <= C_DATA_SETUP_CYCLES - 1;
+                s_timer   <= C_STRETCH_SETUP_CYCLES - 1;
                 s_state   <= st_rx_start_setup;
               else
                 s_timer <= s_timer - 1;
@@ -435,7 +436,7 @@ begin
                   else
                     s_sda_low <= '0';
                   end if;
-                  s_timer <= C_DATA_SETUP_CYCLES - 1;
+                  s_timer <= C_STRETCH_SETUP_CYCLES - 1;
                   s_state <= st_rx_ack_setup;
                 else
                   s_sda_low <= '0';
@@ -452,7 +453,7 @@ begin
                 else
                   s_sda_low <= '0';
                 end if;
-                s_timer <= C_DATA_SETUP_CYCLES - 1;
+                s_timer <= C_STRETCH_SETUP_CYCLES - 1;
                 s_state <= st_rx_ack_setup;
               end if;
 
@@ -479,7 +480,7 @@ begin
             when st_rx_release_hold =>
               if s_timer = 0 then
                 s_sda_low <= '0';
-                s_timer   <= C_DATA_SETUP_CYCLES - 1;
+                s_timer   <= C_STRETCH_SETUP_CYCLES - 1;
                 s_state   <= st_rx_release_setup;
               else
                 s_timer <= s_timer - 1;
@@ -512,7 +513,7 @@ begin
                   else
                     s_sda_low <= '0';
                   end if;
-                  s_timer <= C_DATA_SETUP_CYCLES - 1;
+                  s_timer <= C_STRETCH_SETUP_CYCLES - 1;
                   s_state <= st_tx_bit_setup;
                 else
                   s_sda_low <= '0';
@@ -529,7 +530,7 @@ begin
                 else
                   s_sda_low <= '0';
                 end if;
-                s_timer <= C_DATA_SETUP_CYCLES - 1;
+                s_timer <= C_STRETCH_SETUP_CYCLES - 1;
                 s_state <= st_tx_bit_setup;
               end if;
 
@@ -561,7 +562,7 @@ begin
             when st_tx_release_hold =>
               if s_timer = 0 then
                 s_sda_low <= '0';
-                s_timer   <= C_DATA_SETUP_CYCLES - 1;
+                s_timer   <= C_STRETCH_SETUP_CYCLES - 1;
                 s_state   <= st_tx_release_setup;
               else
                 s_timer <= s_timer - 1;
@@ -605,6 +606,21 @@ begin
               s_scl_low  <= '0';
               s_sda_low  <= '0';
               s_tx_ready <= '0';
+
+            when others =>
+              -- Defensive recovery for an unreachable encoded-state fault.
+              s_state             <= st_idle;
+              s_bit_index         <= 0;
+              s_rx_decision_valid <= '0';
+              s_tx_loaded         <= '0';
+              s_controller_ack    <= '0';
+              s_timer             <= 0;
+              s_active            <= '0';
+              s_read              <= '0';
+              s_rx_valid          <= '0';
+              s_tx_ready          <= '0';
+              s_scl_low           <= '0';
+              s_sda_low           <= '0';
           end case;
         end if;
       end if;
