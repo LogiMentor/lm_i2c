@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ghdl_bin=${GHDL:-ghdl}
-stop_time=20ms
+stop_time=100ms
 
 usage() {
   printf '%s\n' "Usage: run_ghdl.sh [--stop-time <GHDL time>]" >&2
@@ -41,11 +41,16 @@ trap cleanup EXIT
 
 mkdir -p -- "$rtl_work" "$sim_work"
 
-rtl="$repo_root/src/lm_i2c_master.vhd"
-tb="$script_dir/tb_lm_i2c_master.vhd"
-reset_tb="$script_dir/tb_lm_i2c_master_reset.vhd"
-invalid_tb="$script_dir/tb_lm_i2c_master_invalid.vhd"
-main_marker="lm_i2c_master self-check passed"
+master_rtl="$repo_root/src/lm_i2c_master.vhd"
+target_rtl="$repo_root/src/lm_i2c_target.vhd"
+master_tb="$script_dir/tb_lm_i2c_master.vhd"
+master_reset_tb="$script_dir/tb_lm_i2c_master_reset.vhd"
+master_invalid_tb="$script_dir/tb_lm_i2c_master_invalid.vhd"
+target_tb="$script_dir/tb_lm_i2c_target.vhd"
+target_reset_tb="$script_dir/tb_lm_i2c_target_reset.vhd"
+target_invalid_tb="$script_dir/tb_lm_i2c_target_invalid.vhd"
+master_marker="lm_i2c_master self-check passed"
+target_marker="lm_i2c_target functional self-check passed"
 
 cd -- "$work_root"
 
@@ -92,18 +97,29 @@ run_expected_failure() {
   fi
 }
 
-"$ghdl_bin" -a --std=93 --workdir="$rtl_work" "$rtl"
+"$ghdl_bin" -a --std=93 --workdir="$rtl_work" \
+  "$master_rtl" "$target_rtl"
 "$ghdl_bin" --synth --std=93 --workdir="$rtl_work" \
   -gg_clk_freq_hz=50000000 \
   -gg_i2c_freq_hz=400000 \
   lm_i2c_master \
-  >"$work_root/synthesis.txt"
+  >"$work_root/master-synthesis.txt"
+"$ghdl_bin" --synth --std=93 --workdir="$rtl_work" \
+  -gg_clk_freq_hz=50000000 \
+  -gg_i2c_freq_hz=400000 \
+  lm_i2c_target \
+  >"$work_root/target-synthesis.txt"
 
 "$ghdl_bin" -a --std=08 --workdir="$sim_work" \
-  "$rtl" "$tb" "$reset_tb" "$invalid_tb"
+  "$master_rtl" "$target_rtl" \
+  "$master_tb" "$master_reset_tb" "$master_invalid_tb" \
+  "$target_tb" "$target_reset_tb" "$target_invalid_tb"
 "$ghdl_bin" -e --std=08 --workdir="$sim_work" tb_lm_i2c_master
 "$ghdl_bin" -e --std=08 --workdir="$sim_work" tb_lm_i2c_master_reset
 "$ghdl_bin" -e --std=08 --workdir="$sim_work" tb_lm_i2c_master_invalid
+"$ghdl_bin" -e --std=08 --workdir="$sim_work" tb_lm_i2c_target
+"$ghdl_bin" -e --std=08 --workdir="$sim_work" tb_lm_i2c_target_reset
+"$ghdl_bin" -e --std=08 --workdir="$sim_work" tb_lm_i2c_target_invalid
 
 config_index=0
 for config in \
@@ -118,7 +134,7 @@ for config in \
   read -r clock_hz bus_hz <<<"$config"
   printf 'Running clk=%s Hz, scl=%s Hz\n' "$clock_hz" "$bus_hz"
   output_file="$work_root/main-$config_index.txt"
-  run_with_marker "$main_marker" "$output_file" \
+  run_with_marker "$master_marker" "$output_file" \
     "$ghdl_bin" -r --std=08 --workdir="$sim_work" tb_lm_i2c_master \
     -gg_clk_freq_hz="$clock_hz" \
     -gg_i2c_freq_hz="$bus_hz" \
@@ -133,6 +149,47 @@ for reset_case in {0..14}; do
   run_with_marker "$reset_marker" "$work_root/reset-$reset_case.txt" \
     "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
     tb_lm_i2c_master_reset \
+    -gg_reset_case="$reset_case" \
+    --assert-level=error \
+    --stop-time="$stop_time"
+done
+
+config_index=0
+for config in \
+  "10000000 50000 50000" \
+  "10000000 100000 100000" \
+  "10000000 137000 137000" \
+  "10000000 200000 200000" \
+  "10000000 333000 333000" \
+  "10000000 400000 400000" \
+  "25000000 400000 400000" \
+  "50000000 400000 400000" \
+  "851064 100000 100000" \
+  "3076924 333000 333000" \
+  "3200000 400000 400000" \
+  "10000000 400000 50000" \
+  "10000000 400000 10000" \
+  "10000000 100000 25000"; do
+  read -r clock_hz maximum_hz actual_hz <<<"$config"
+  printf 'Running target clk=%s Hz, maximum=%s Hz, actual=%s Hz\n' \
+    "$clock_hz" "$maximum_hz" "$actual_hz"
+  output_file="$work_root/target-main-$config_index.txt"
+  run_with_marker "$target_marker" "$output_file" \
+    "$ghdl_bin" -r --std=08 --workdir="$sim_work" tb_lm_i2c_target \
+    -gg_clk_freq_hz="$clock_hz" \
+    -gg_i2c_freq_hz="$maximum_hz" \
+    -gg_actual_i2c_freq_hz="$actual_hz" \
+    --assert-level=error \
+    --stop-time="$stop_time"
+  config_index=$((config_index + 1))
+done
+
+for reset_case in {0..7}; do
+  reset_marker="lm_i2c_target reset case passed: $reset_case"
+  printf 'Running target reset case %s\n' "$reset_case"
+  run_with_marker "$reset_marker" "$work_root/target-reset-$reset_case.txt" \
+    "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+    tb_lm_i2c_target_reset \
     -gg_reset_case="$reset_case" \
     --assert-level=error \
     --stop-time="$stop_time"
@@ -156,5 +213,79 @@ run_expected_failure \
   -gg_i2c_freq_hz=100000 \
   --assert-level=error
 
+run_expected_failure \
+  "g_i2c_freq_hz must not exceed 400 kHz" \
+  "$work_root/target-invalid-frequency.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=10000000 \
+  -gg_i2c_freq_hz=400001 \
+  --assert-level=error
+
+run_expected_failure \
+  "g_clk_freq_hz must be at least eight times g_i2c_freq_hz" \
+  "$work_root/target-invalid-ratio.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=700000 \
+  -gg_i2c_freq_hz=100000 \
+  --assert-level=error
+
+# These pairs bracket the stable-HIGH detector limits. At each upper point,
+# reaching the later takeover assertion proves the detector assertion passed.
+run_expected_failure \
+  "system clock is too slow for stable-HIGH START/STOP detection" \
+  "$work_root/target-invalid-standard-stable-high.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=250000 \
+  -gg_i2c_freq_hz=30000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-standard-stable-high-pass.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=250001 \
+  -gg_i2c_freq_hz=30000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for stable-HIGH START/STOP detection" \
+  "$work_root/target-invalid-fast-stable-high.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=1666666 \
+  -gg_i2c_freq_hz=200000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-fast-stable-high-pass.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=1666667 \
+  -gg_i2c_freq_hz=200000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-invalid-standard-takeover.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=851063 \
+  -gg_i2c_freq_hz=100000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-invalid-fast-takeover.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=3076923 \
+  -gg_i2c_freq_hz=333000 \
+  --assert-level=error
+
 printf '%s\n' \
-  "All I2C master regressions and the VHDL-93 synthesis check passed."
+  "All I2C controller and target regressions, VHDL-93 analysis, and synthesis checks passed."

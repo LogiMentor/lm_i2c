@@ -102,7 +102,7 @@ jobs:
           fi
 
   regression-ubuntu:
-    name: VHDL regression (Ubuntu)
+    name: I2C controller and target regression (Ubuntu)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -117,7 +117,7 @@ jobs:
           version: 6.0.0
           backend: mcode
 
-      - name: Run Bash regression
+      - name: Run controller and target Bash regression
         shell: bash
         run: bash sim/run_ghdl.sh
 
@@ -334,7 +334,7 @@ jobs:
           }
 
   regression-windows:
-    name: VHDL regression (Windows)
+    name: I2C controller and target regression (Windows)
     runs-on: windows-2025
     timeout-minutes: 15
     defaults:
@@ -352,5 +352,5 @@ jobs:
           version: 6.0.0
           backend: mcode
 
-      - name: Run native PowerShell regression
+      - name: Run controller and target native PowerShell regression
         run: ./sim/run_ghdl.ps1

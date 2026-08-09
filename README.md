@@ -2,15 +2,19 @@
 
 [![ci](https://github.com/LogiMentor/lm_i2c/actions/workflows/ci.yml/badge.svg)](https://github.com/LogiMentor/lm_i2c/actions/workflows/ci.yml)
 
-Dependency-free I2C master core written in portable VHDL.
+Dependency-free I2C master/controller and target cores written in portable
+VHDL.
 
-This release provides the synthesizable `lm_i2c_master` controller. A
-synthesizable target/slave core is planned for a later pull request.
+NXP UM10204 revision 7.0 uses the terms controller and target. This repository
+uses that terminology in new interfaces and documentation. The existing public
+controller entity remains named `lm_i2c_master` for interface compatibility;
+the target entity is `lm_i2c_target`.
 
 ## Scope and reference
 
-The core supports I2C Standard-mode through 100 kHz and Fast-mode through
-400 kHz. Fast-mode Plus and High-speed mode are not supported.
+The synthesizable controller and target support I2C Standard-mode through
+100 kHz and Fast-mode through 400 kHz. Fast-mode Plus and High-speed mode are
+not supported.
 
 Bus behavior and timing follow
 [NXP UM10204, revision 7.0](https://www.nxp.com/docs/en/user-guide/UM10204.pdf).
@@ -20,10 +24,13 @@ repository.
 ## Highlights
 
 - IEEE-library-only RTL that analyzes and synthesizes as VHDL-93
+- reusable 7-bit controller and target cores without internal register maps
 - one-byte commands plus an ownership-checked STOP-only command
 - optional START or repeated START before the byte
 - optional STOP after the byte
 - ready/valid command and backpressured ready/valid response interfaces
+- target RX and TX byte streams with application backpressure
+- target-selected address and direction status without fixed memory behavior
 - explicit local bus ownership and independent physical bus-busy detection
 - indefinite clock stretching in every released-SCL phase
 - multi-controller arbitration-loss detection without an automatic STOP
@@ -39,9 +46,13 @@ stuck-bus recovery.
 | Path | Purpose |
 | --- | --- |
 | `src/lm_i2c_master.vhd` | Synthesizable controller RTL |
+| `src/lm_i2c_target.vhd` | Synthesizable target RTL |
 | `sim/tb_lm_i2c_master.vhd` | Resolved-bus functional and timing regression |
 | `sim/tb_lm_i2c_master_reset.vhd` | Reset-abort phase regression |
 | `sim/tb_lm_i2c_master_invalid.vhd` | Expected-failure generic checks |
+| `sim/tb_lm_i2c_target.vhd` | Target functional, timing, and controller integration regression |
+| `sim/tb_lm_i2c_target_reset.vhd` | Target reset-abort phase regression |
+| `sim/tb_lm_i2c_target_invalid.vhd` | Target expected-failure generic checks |
 | `sim/run_ghdl.sh` | Bash regression entry point |
 | `sim/run_ghdl.ps1` | Native PowerShell regression entry point |
 | `tools/check_repo_hygiene.sh` | Bash repository policy checker |
@@ -55,10 +66,22 @@ g_i2c_freq_hz : positive := 100_000
 ```
 
 `g_clk_freq_hz` is required and must be at least eight times
-`g_i2c_freq_hz`. The requested bus frequency must not exceed 400 kHz.
-Unsupported combinations fail an assertion.
+`g_i2c_freq_hz`. The frequency must not exceed 400 kHz. Unsupported
+combinations fail an assertion.
 
-## Public interface
+For `lm_i2c_master`, `g_i2c_freq_hz` is the requested maximum generated SCL
+frequency. For `lm_i2c_target`, it is the maximum expected external SCL
+frequency; a slower external controller is supported without reconfiguration.
+The target also asserts that the mode-specific minimum LOW time contains enough
+system-clock cycles for its synchronized stretch-takeover strategy. In
+addition to the 8:1 ratio, the target requires at least five system-clock
+cycles in the published minimum LOW interval. The resulting absolute minima
+are 851,064 Hz when `g_i2c_freq_hz <= 100_000` and 3,076,924 Hz above 100 kHz.
+The effective lower bound is therefore the greater of the applicable absolute
+minimum and `8 * g_i2c_freq_hz`. For example, 400 kHz requires at least
+3.2 MHz because the ratio is the stronger constraint.
+
+## Controller public interface
 
 ### Clock and command
 
@@ -151,6 +174,136 @@ s_sda_in <= sda_io;
 
 External pull-ups are required. Follow the target device's electrical and I/O
 buffer guidance.
+
+## Target public interface
+
+### Configuration and status
+
+| Port | Direction | Meaning |
+| --- | --- | --- |
+| `clk_i` | input | system clock |
+| `rst_n_i` | input | active-low synchronous reset |
+| `enable_i` | input | permit selection by the sampled address |
+| `address_i[6:0]` | input | exact 7-bit target address |
+| `active_o` | output | this target is selected in the current transfer |
+| `read_o` | output | selected direction: zero is controller write, one is controller read |
+| `addressed_o` | output | one-cycle pulse for each enabled address match |
+| `stop_o` | output | one-cycle pulse for STOP while selected |
+
+`enable_i` and `address_i` must be static or synchronous to `clk_i`. Both are
+sampled at each synchronized START. Later changes cannot affect the current
+address byte. Selection requires the sampled enable value to be high and bits
+7 through 1 of the received address byte to match the sampled address exactly.
+Bit 0 becomes `read_o`. General call and 10-bit address recognition are not
+implemented.
+
+An enabled match asserts `active_o`, updates `read_o`, pulses `addressed_o`,
+and ACKs the address. A repeated START immediately cancels the old selection
+and begins a new sampled address phase. A repeated match pulses
+`addressed_o` again. A mismatch or disabled target never ACKs, stretches,
+drives SDA, or emits an application handshake.
+
+`active_o` remains high after an application NACK or controller NACK while the
+core waits for STOP or repeated START. STOP while selected releases both lines,
+clears `active_o`, returns `read_o` to zero, and pulses `stop_o`. STOP while not
+selected produces no target transaction event.
+
+### Controller-to-target stream
+
+| Port | Direction | Meaning |
+| --- | --- | --- |
+| `rx_valid_o` | output | one received byte is pending |
+| `rx_ready_i` | input | application accepts or rejects the pending byte |
+| `rx_data_o[7:0]` | output | received byte, MSB first on the bus |
+| `rx_nack_i` | input | decision captured with the RX handshake; one requests NACK |
+
+After a selected controller-write byte, `rx_valid_o` is asserted with stable
+`rx_data_o`. Both remain stable until a rising `clk_i` edge with
+`rx_ready_i = '1'`. The core stretches the following LOW phase until this
+handshake occurs, so the byte cannot be overwritten and the application can
+reject it without data loss.
+
+`rx_nack_i` is meaningful only on the `rx_valid_o`/`rx_ready_i` handshake
+edge. Zero transmits ACK and accepts another byte. One transmits NACK, releases
+SDA, and suppresses all further RX bytes until STOP or repeated START.
+
+### Target-to-controller stream
+
+| Port | Direction | Meaning |
+| --- | --- | --- |
+| `tx_valid_i` | input | application presents one transmit byte |
+| `tx_ready_o` | output | target is requesting and can capture that byte |
+| `tx_data_i[7:0]` | input | byte captured on the TX handshake |
+
+For a selected controller read, `tx_ready_o` remains high until a rising
+`clk_i` edge with `tx_valid_i = '1'`. The complete byte is captured atomically
+on that edge and is then transmitted MSB first. If it is unavailable when
+needed, the target stretches SCL LOW indefinitely.
+
+The TX handshake consumes the application byte before the controller later
+ACKs or NACKs that byte on the bus. Controller ACK causes the target to request
+the next byte. Controller NACK suppresses another request and leaves SDA
+released until STOP or repeated START. The core contains only the
+protocol-required byte register, not a transmit FIFO.
+
+### Resolved bus
+
+| Port | Direction | Meaning |
+| --- | --- | --- |
+| `scl_i` | input | sampled physical resolved SCL bus input |
+| `sda_i` | input | sampled physical resolved SDA bus input |
+| `scl_low_o` | output | one actively pulls SCL LOW; zero releases SCL |
+| `sda_low_o` | output | one actively pulls SDA LOW; zero releases SDA |
+
+These open-drain semantics are identical to the controller interface. The
+target never drives either line HIGH.
+
+### Target bus synchronization, timing, and stretching
+
+The target uses two synchronization flip-flops per resolved input and makes all
+START, STOP, SCL-edge, data, ACK/NACK, and stretching decisions from those
+synchronized values. Synchronizer latency is included in its LOW-phase
+takeover assertion and test coverage. No analog or digital spike filtering is
+claimed. A START or STOP is recognized only when both the previous and current
+synchronized SCL samples are HIGH. This stable-HIGH qualification prevents a
+legal late SDA update before an SCL rising edge from being mistaken for a bus
+event. The target asserts that one `clk_i` period is strictly shorter than the
+applicable minimum of tSU;STA, tHD;STA, and tSU;STO. The published takeover
+clock constraints are stronger than this detector requirement for every
+supported Standard-mode and Fast-mode configuration.
+
+The target pulls SCL low only after observing a physical falling edge and only
+while selected work requires more LOW time. It stretches for RX backpressure,
+TX starvation, and the internal hold/setup interval needed for a
+target-generated SDA transition. It never stretches while disabled, after an
+address mismatch, or while otherwise passive. Releasing `scl_low_o` does not
+complete a HIGH phase; the target waits until synchronized physical `scl_i`
+has actually risen.
+
+For address ACK, received-byte ACK/NACK, read-data bits, and release before the
+controller ACK/NACK bit, the target first takes over the LOW phase, preserves a
+conservative 300 ns from the physical SCL falling edge to its SDA change, then
+preserves at least 1.25 us before releasing SCL. This fixed release margin
+covers the Standard-mode 1.0 us maximum rise time plus its 250 ns data-setup
+minimum even when the actual controller is slower than a Fast-mode-configured
+maximum. It never actively drives either line high and never creates START or
+STOP.
+
+### Target reset and abort behavior
+
+Reset is synchronous and active low. On its rising `clk_i` edge it releases
+SCL and SDA, clears selection and direction, clears the status pulses, discards
+pending RX data and an accepted but not yet transmitted TX byte, cancels both
+ready/valid handshakes, and clears all address and bit state. On that edge the
+core deasserts its own SCL and SDA pull-low controls, ending local stretching;
+the resolved bus can still remain LOW if another device is pulling it LOW.
+
+Reset does not deliberately generate a STOP sequence. If reset occurs while
+the target is holding either line LOW, the physical release transitions depend
+on the external pull-ups and bus timing and must not be relied upon as a
+protocol STOP. The external controller can observe a NACK or incomplete
+transfer. A new target transaction requires reset release followed by a fresh
+START; no stale RX or TX handshake is retained.
 
 ## Ownership and bus-free behavior
 
@@ -252,6 +405,61 @@ If an address or data write returns `rsp_nack_o = '1'` without an appended
 STOP, submit a command with `cmd_stop_only_i = '1'`. The response confirms
 that STOP completed. No dummy data byte is placed on the bus.
 
+## Target application examples
+
+The target deliberately assigns no meaning to byte values. A register index,
+payload, command, or memory pointer is an application-level convention above
+this core.
+
+### Small target write
+
+For target address `0x52`, a controller sends address byte `0xA4` followed by
+`0x12` and STOP:
+
+1. `addressed_o` pulses, `active_o = '1'`, and `read_o = '0'`.
+2. `rx_valid_o` rises with `rx_data_o = 0x12`.
+3. The application presents `rx_ready_i = '1'` and `rx_nack_i = '0'` on one
+   rising `clk_i` edge, consuming and ACKing the byte.
+4. STOP clears `active_o` and pulses `stop_o`.
+
+To reject `0x12`, the application performs the same handshake with
+`rx_nack_i = '1'`. The target sends NACK and accepts no later byte in that
+transfer.
+
+### Small target read
+
+For address byte `0xA5`, the target pulses `addressed_o` with `read_o = '1'`
+and asserts `tx_ready_o`. The application holds `tx_valid_i = '1'` and
+`tx_data_i = 0x3C` until the handshake edge. The target then transmits `0x3C`.
+If the controller ACKs, `tx_ready_o` requests another byte. If it NACKs, no
+new byte is requested.
+
+### Controller and target integration
+
+The two cores can share the same resolved open-drain bus in a system or
+testbench:
+
+```vhdl
+s_scl <= '0' when
+  s_controller_scl_low = '1' or s_target_scl_low = '1'
+  else '1';
+s_sda <= '0' when
+  s_controller_sda_low = '1' or s_target_sda_low = '1'
+  else '1';
+
+-- Feed s_scl and s_sda to scl_i and sda_i on both lm_i2c_master and
+-- lm_i2c_target. Connect each entity's drive-low outputs to the corresponding
+-- controller or target terms above.
+```
+
+For a write to target `0x52`, `lm_i2c_master` first submits `0xA4` with START,
+then submits the payload byte. The target pulses `addressed_o` and delivers the
+payload through RX. For a read, the controller submits `0xA5`, the target
+accepts TX data, and the controller submits a read command. A combined
+register-style transfer is built from a write address and application-defined
+index, repeated START with `0xA5`, then one or more read commands. The target
+core itself does not store or increment the index.
+
 ## Timing and achieved frequency
 
 All published minimum times are converted to system-clock cycles with ceiling
@@ -294,6 +502,20 @@ system clock. This is a conservative timing model, not an exact-cycle promise.
 Ceiling division and synchronization keep the achieved SCL frequency at or
 below the requested value. Clock stretching reduces it further.
 
+## Limitations
+
+The repository does not implement:
+
+- 10-bit target addressing or general-call recognition;
+- Fast-mode Plus, High-speed mode, SMBus, or PMBus behavior;
+- target register maps, RAM, automatic register pointers, or deep FIFOs;
+- interrupts or AXI, Wishbone, or APB interfaces;
+- stretch timeouts, stuck-bus recovery, or automatic controller retry;
+- controller behavior inside `lm_i2c_target`.
+
+Application-specific address maps, access policy, buffering, and recovery
+belong above these byte-stream interfaces.
+
 ## Verification
 
 GHDL 6 or later is recommended. Run the complete native PowerShell regression:
@@ -310,13 +532,19 @@ bash sim/run_ghdl.sh
 
 Both runners:
 
-- analyze and synthesize the RTL as VHDL-93;
+- analyze and synthesize both RTL entities as VHDL-93;
 - run 10 MHz with 50, 100, 137, 200, 333, and 400 kHz requests, plus
-  12 MHz/100 kHz and 50 MHz/400 kHz;
-- run reset injection through every major bus phase;
+  12 MHz/100 kHz and 50 MHz/400 kHz for the controller;
+- run the target at 10 MHz with configured/actual 50, 100, 137, 200, 333, and
+  400 kHz buses, plus 25 MHz/400 kHz and 50 MHz/400 kHz;
+- run the exact target takeover pass boundaries at 851,064 Hz/100 kHz and
+  3,076,924 Hz/333 kHz, plus the 3.2 MHz/400 kHz ratio boundary;
+- run slower actual buses at 50 kHz and 10 kHz under a configured 400 kHz
+  maximum, and at 25 kHz under a configured 100 kHz maximum;
+- run reset injection through every major controller and target bus phase;
 - verify unsupported generic failures for their intended assertions;
-- require the unique `lm_i2c_master self-check passed` marker;
-- reject a zero-exit truncated simulation that did not reach that marker;
+- require unique functional and per-reset success markers for both entities;
+- reject a zero-exit truncated simulation that did not reach its marker;
 - remove temporary work on success and failure.
 
 The main testbench uses a passive monitor that observes only resolved SCL and
@@ -326,6 +554,18 @@ high, and expected START/STOP counts. The target and competing-controller
 models exercise late legal ACK/read-data changes, repeated-START and STOP-only
 stretching, response backpressure, reset-time bus qualification, physical
 bus-busy protection, and arbitration-loss behavior.
+
+The target testbench instantiates the real synthesizable `lm_i2c_master` and
+`lm_i2c_target` on one resolved bus and independently checks both application
+streams. Its directed controller model additionally verifies disabled and
+mismatched address passivity, exact ACK slots, RX backpressure and application
+NACK, TX starvation and controller ACK/NACK, multi-byte transfers, repeated
+START direction changes and deselection, sampled configuration, slower SCL,
+early-ready application ACK/NACK decisions, late legal SDA updates at every
+target configuration, and fresh transfers after reset. A passive monitor
+checks target SDA stability while SCL is HIGH, the literal 300 ns hold policy,
+the fixed 1.25 us stretch-release setup policy, selected-only LOW extension,
+and open-drain release.
 
 Repository policy checks are also available in both shells:
 
