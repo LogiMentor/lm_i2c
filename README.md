@@ -5,6 +5,10 @@
 Dependency-free I2C master/controller and target cores written in portable
 VHDL.
 
+v0.1.0 is the first public release of the controller and target cores. This is
+open-source RTL with extensive automated verification, not a certified I2C
+implementation.
+
 NXP UM10204 revision 7.0 uses the terms controller and target. This repository
 uses that terminology in new interfaces and documentation. The existing public
 controller entity remains named `lm_i2c_master` for interface compatibility;
@@ -40,6 +44,40 @@ repository.
 
 The core has no clock-stretch timeout and does not implement automatic retry or
 stuck-bus recovery.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Controller public interface](#controller-public-interface)
+- [Target public interface](#target-public-interface)
+- [Transfer examples](#transfer-examples)
+- [Target application examples](#target-application-examples)
+- [Timing and achieved frequency](#timing-and-achieved-frequency)
+- [Limitations](#limitations)
+- [Verification](#verification)
+- [License](#license)
+
+## Quick start
+
+1. Add the cores you need directly to your VHDL project:
+   `src/lm_i2c_master.vhd` and/or `src/lm_i2c_target.vhd`. Both are VHDL-93,
+   use only IEEE libraries, and require no generated IP wrapper, package
+   manager, vendor primitive, external RTL, or support package.
+2. Set the required `g_clk_freq_hz` generic and, if needed, override
+   `g_i2c_freq_hz` from its 100 kHz default. See [Generics](#generics) for the
+   supported combinations and target clock requirements.
+3. Connect SCL and SDA as open-drain signals. For `scl_low_o` and `sda_low_o`,
+   `'1'` pulls the line LOW and `'0'` releases it. Feed each resolved physical
+   pad level back into `scl_i` and `sda_i`; external pull-ups are required.
+4. With `lm_i2c_master`, issue one-byte commands through `cmd_valid_i` and
+   `cmd_ready_o`, then consume the backpressured response through `rsp_valid_o`
+   and `rsp_ready_i`. See the [controller interface](#controller-public-interface)
+   and [transfer examples](#transfer-examples).
+5. With `lm_i2c_target`, configure `enable_i` and `address_i`, consume
+   controller writes through the RX ready/valid stream, and supply
+   controller-read bytes through the TX ready/valid stream. See the
+   [target interface](#target-public-interface) and
+   [target application examples](#target-application-examples).
 
 ## Repository layout
 
