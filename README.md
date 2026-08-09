@@ -246,6 +246,18 @@ the next byte. Controller NACK suppresses another request and leaves SDA
 released until STOP or repeated START. The core contains only the
 protocol-required byte register, not a transmit FIFO.
 
+### Resolved bus
+
+| Port | Direction | Meaning |
+| --- | --- | --- |
+| `scl_i` | input | sampled physical resolved SCL bus input |
+| `sda_i` | input | sampled physical resolved SDA bus input |
+| `scl_low_o` | output | one actively pulls SCL LOW; zero releases SCL |
+| `sda_low_o` | output | one actively pulls SDA LOW; zero releases SDA |
+
+These open-drain semantics are identical to the controller interface. The
+target never drives either line HIGH.
+
 ### Target bus synchronization, timing, and stretching
 
 The target uses two synchronization flip-flops per resolved input and makes all
@@ -255,7 +267,10 @@ takeover assertion and test coverage. No analog or digital spike filtering is
 claimed. A START or STOP is recognized only when both the previous and current
 synchronized SCL samples are HIGH. This stable-HIGH qualification prevents a
 legal late SDA update before an SCL rising edge from being mistaken for a bus
-event.
+event. The target asserts that one `clk_i` period is strictly shorter than the
+applicable minimum of tSU;STA, tHD;STA, and tSU;STO. The published takeover
+clock constraints are stronger than this detector requirement for every
+supported Standard-mode and Fast-mode configuration.
 
 The target pulls SCL low only after observing a physical falling edge and only
 while selected work requires more LOW time. It stretches for RX backpressure,

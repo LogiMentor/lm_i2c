@@ -87,6 +87,18 @@ architecture a_rtl of lm_i2c_target is
     end if;
   end function f_max;
 
+  function f_min (
+    a : positive;
+    b : positive
+  ) return positive is
+  begin
+    if a < b then
+      return a;
+    else
+      return b;
+    end if;
+  end function f_min;
+
   function f_mode_cycles (
     standard_cycles : positive;
     fast_cycles     : positive;
@@ -108,6 +120,25 @@ architecture a_rtl of lm_i2c_target is
     f_scale_ceil(g_clk_freq_hz, 47, 10_000_000),
     f_scale_ceil(g_clk_freq_hz, 13, 10_000_000),
     g_i2c_freq_hz
+  );
+  constant C_START_SETUP_MIN_CYCLES : positive := f_mode_cycles(
+    f_scale_ceil(g_clk_freq_hz, 47, 10_000_000),
+    f_scale_ceil(g_clk_freq_hz, 6, 10_000_000),
+    g_i2c_freq_hz
+  );
+  constant C_START_HOLD_MIN_CYCLES : positive := f_mode_cycles(
+    f_scale_ceil(g_clk_freq_hz, 4, 1_000_000),
+    f_scale_ceil(g_clk_freq_hz, 6, 10_000_000),
+    g_i2c_freq_hz
+  );
+  constant C_STOP_SETUP_MIN_CYCLES : positive := f_mode_cycles(
+    f_scale_ceil(g_clk_freq_hz, 4, 1_000_000),
+    f_scale_ceil(g_clk_freq_hz, 6, 10_000_000),
+    g_i2c_freq_hz
+  );
+  constant C_STABLE_HIGH_MIN_CYCLES : positive := f_min(
+    C_START_SETUP_MIN_CYCLES,
+    f_min(C_START_HOLD_MIN_CYCLES, C_STOP_SETUP_MIN_CYCLES)
   );
   constant C_SYNC_TAKEOVER_CYCLES : positive := 3;
   constant C_TIMER_MAX : positive :=
@@ -186,6 +217,10 @@ begin
 
   assert g_clk_freq_hz / g_i2c_freq_hz >= 8
     report "g_clk_freq_hz must be at least eight times g_i2c_freq_hz"
+    severity failure;
+
+  assert C_STABLE_HIGH_MIN_CYCLES >= 2
+    report "system clock is too slow for stable-HIGH START/STOP detection"
     severity failure;
 
   assert C_LOW_MIN_CYCLES >= C_SYNC_TAKEOVER_CYCLES + 2

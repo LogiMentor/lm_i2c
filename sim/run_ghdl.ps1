@@ -381,6 +381,60 @@ try {
       "--assert-level=error"
     )
 
+  # These pairs bracket the stable-HIGH detector limits. At each upper point,
+  # reaching the later takeover assertion proves the detector assertion passed.
+  Invoke-GhdlExpectedFailure `
+    -Expected "system clock is too slow for stable-HIGH START/STOP detection" `
+    -OutputFile (Join-Path $workRoot "target-invalid-standard-stable-high.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=250000",
+      "-gg_i2c_freq_hz=30000",
+      "--assert-level=error"
+    )
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "system clock is too slow for synchronized target SCL takeover" `
+    -OutputFile (Join-Path $workRoot "target-standard-stable-high-pass.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=250001",
+      "-gg_i2c_freq_hz=30000",
+      "--assert-level=error"
+    )
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "system clock is too slow for stable-HIGH START/STOP detection" `
+    -OutputFile (Join-Path $workRoot "target-invalid-fast-stable-high.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=1666666",
+      "-gg_i2c_freq_hz=200000",
+      "--assert-level=error"
+    )
+
+  Invoke-GhdlExpectedFailure `
+    -Expected "system clock is too slow for synchronized target SCL takeover" `
+    -OutputFile (Join-Path $workRoot "target-fast-stable-high-pass.txt") `
+    -Arguments @(
+      "-r",
+      "--std=08",
+      "--workdir=$simWork",
+      "tb_lm_i2c_target_invalid",
+      "-gg_clk_freq_hz=1666667",
+      "-gg_i2c_freq_hz=200000",
+      "--assert-level=error"
+    )
+
   Invoke-GhdlExpectedFailure `
     -Expected "system clock is too slow for synchronized target SCL takeover" `
     -OutputFile (Join-Path $workRoot "target-invalid-standard-takeover.txt") `

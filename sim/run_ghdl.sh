@@ -231,6 +231,44 @@ run_expected_failure \
   -gg_i2c_freq_hz=100000 \
   --assert-level=error
 
+# These pairs bracket the stable-HIGH detector limits. At each upper point,
+# reaching the later takeover assertion proves the detector assertion passed.
+run_expected_failure \
+  "system clock is too slow for stable-HIGH START/STOP detection" \
+  "$work_root/target-invalid-standard-stable-high.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=250000 \
+  -gg_i2c_freq_hz=30000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-standard-stable-high-pass.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=250001 \
+  -gg_i2c_freq_hz=30000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for stable-HIGH START/STOP detection" \
+  "$work_root/target-invalid-fast-stable-high.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=1666666 \
+  -gg_i2c_freq_hz=200000 \
+  --assert-level=error
+
+run_expected_failure \
+  "system clock is too slow for synchronized target SCL takeover" \
+  "$work_root/target-fast-stable-high-pass.txt" \
+  "$ghdl_bin" -r --std=08 --workdir="$sim_work" \
+  tb_lm_i2c_target_invalid \
+  -gg_clk_freq_hz=1666667 \
+  -gg_i2c_freq_hz=200000 \
+  --assert-level=error
+
 run_expected_failure \
   "system clock is too slow for synchronized target SCL takeover" \
   "$work_root/target-invalid-standard-takeover.txt" \
