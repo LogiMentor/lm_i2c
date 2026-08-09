@@ -28,7 +28,8 @@ repository.
 ## Highlights
 
 - IEEE-library-only RTL that analyzes and synthesizes as VHDL-93
-- reusable 7-bit controller and target cores without internal register maps
+- reusable byte-oriented controller and 7-bit target cores without internal
+  register maps
 - one-byte commands plus an ownership-checked STOP-only command
 - optional START or repeated START before the byte
 - optional STOP after the byte
@@ -104,7 +105,7 @@ g_i2c_freq_hz : positive := 100_000
 ```
 
 `g_clk_freq_hz` is required and must be at least eight times
-`g_i2c_freq_hz`. The frequency must not exceed 400 kHz. Unsupported
+`g_i2c_freq_hz`. `g_i2c_freq_hz` must not exceed 400 kHz. Unsupported
 combinations fail an assertion.
 
 For `lm_i2c_master`, `g_i2c_freq_hz` is the requested maximum generated SCL
