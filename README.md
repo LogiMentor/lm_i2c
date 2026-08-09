@@ -49,6 +49,8 @@ stuck-bus recovery.
 ## Contents
 
 - [Quick start](#quick-start)
+- [Repository layout](#repository-layout)
+- [Generics](#generics)
 - [Controller public interface](#controller-public-interface)
 - [Target public interface](#target-public-interface)
 - [Transfer examples](#transfer-examples)
